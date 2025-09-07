@@ -14,6 +14,7 @@ const getIdentifier = (req) => {
       if (decoded && decoded.userId) {
         req.decodedToken = decoded; // Store verified token
         req.tokenVerified = true; // Flag that token is already verified
+        // Use just userId for rate limiting (user can have multiple orgs)
         return `user:${decoded.userId}`; // ✅ User-specific limiting (unlimited users per IP)
       }
     } catch (error) {

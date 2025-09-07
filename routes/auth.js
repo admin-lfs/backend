@@ -53,7 +53,7 @@ router.post("/send-otp", async (req, res) => {
     // Check if user exists
     const { data: user, error } = await supabase
       .from("users")
-      .select("phone_number, role, is_active")
+      .select("phone_number, role, is_active, org_id")
       .eq("phone_number", phoneNumber)
       .single();
 
@@ -157,6 +157,7 @@ router.post("/verify-otp", async (req, res) => {
     // Generate JWT token
     const token = generateToken({
       userId: user.id,
+      orgId: user.org_id,
     });
 
     // Log successful login
@@ -187,7 +188,7 @@ router.post("/resend-otp", async (req, res) => {
     // Check if user exists
     const { data: user, error } = await supabase
       .from("users")
-      .select("phone_number, role, is_active")
+      .select("role, is_active")
       .eq("phone_number", phoneNumber)
       .single();
 
@@ -347,6 +348,7 @@ router.post("/faculty-login", async (req, res) => {
     // Generate JWT token
     const token = generateToken({
       userId: user.id,
+      orgId: user.org_id,
     });
 
     console.log(`✅ Successful faculty login: ${username} (${user.role})`);

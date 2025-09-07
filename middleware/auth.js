@@ -26,42 +26,72 @@ const authenticateToken = async (req, res, next) => {
       );
     }
 
+    // Ensure orgId exists in JWT
+    if (!decoded.orgId) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
     const userCacheKey = `user_auth:${decoded.userId}`;
 
     // Try Redis cache first
     try {
       const cachedUser = await redis.get(userCacheKey);
       if (cachedUser) {
-        const user = JSON.parse(cachedUser);
-        if (!user.is_active) {
+        const userData = JSON.parse(cachedUser);
+        if (!userData.is_active) {
           return res.status(401).json({ error: "Account deactivated" });
         }
-        req.user = user;
+        req.user = userData.user;
+        req.userOrgs = userData.orgs; // Pass multiple orgs
         return next();
       }
     } catch (redisError) {
       console.warn("Redis cache read error:", redisError);
     }
 
-    // Cache miss - fetch from database
-    const { data: user, error } = await supabase
+    // Cache miss - fetch ALL user records across organizations
+    const { data: userRecords, error } = await supabase
       .from("users")
-      .select("id, role, is_active")
+      .select(
+        `
+        id, role, is_active, org_id, full_name,
+        organizations(id, name)
+      `
+      )
       .eq("id", decoded.userId)
-      .single();
+      .eq("is_active", true);
 
-    if (error || !user || !user.is_active) {
+    if (error || !userRecords || userRecords.length === 0) {
       return res.status(401).json({ error: "Invalid or expired token" });
     }
 
-    // Cache user data permanently
+    // Structure the data
+    const primaryUser = userRecords[0];
+    const allOrgs = userRecords.map((record) => ({
+      org_id: record.org_id,
+      org_name: record.organizations.name,
+      role: record.role,
+      full_name: record.full_name,
+    }));
+
+    const userData = {
+      user: {
+        id: primaryUser.id,
+        role: primaryUser.role,
+        is_active: primaryUser.is_active,
+      },
+      orgs: allOrgs,
+    };
+
+    // Cache the complete user data
     try {
-      await redis.set(userCacheKey, JSON.stringify(user));
+      await redis.set(userCacheKey, JSON.stringify(userData));
     } catch (redisError) {
       console.warn("Redis cache write error:", redisError);
     }
 
-    req.user = user;
+    req.user = userData.user;
+    req.userOrgs = userData.orgs; // Available organizations for this user
     next();
   } catch (error) {
     console.error("Auth middleware error:", error);
