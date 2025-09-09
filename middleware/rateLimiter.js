@@ -24,14 +24,14 @@ const getIdentifier = (req) => {
     }
   }
 
-  // 2. For OTP requests - use phone number (not IP)
-  if (req.body.phoneNumber) {
-    return `phone:${req.body.phoneNumber}`; // ✅ Phone-specific limiting
+  // 2. For OTP requests - use phone number (safe access)
+  if (req.body && req.body.phoneNumber) {
+    return `phone:${req.body.phoneNumber}`;
   }
 
-  // 3. For login requests - use username (not IP)
-  if (req.body.username) {
-    return `username:${req.body.username}`; // ✅ Username-specific limiting
+  // 3. For login requests - use username (safe access)
+  if (req.body && req.body.username) {
+    return `username:${req.body.username}`;
   }
 
   // 4. ONLY for unauthenticated general requests - use IP
