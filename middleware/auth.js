@@ -26,7 +26,8 @@ const authenticateToken = async (req, res, next) => {
     try {
       const cachedUser = await redis.get(userCacheKey);
       if (cachedUser) {
-        const user = JSON.parse(cachedUser);
+        const user =
+          typeof cachedUser === "string" ? JSON.parse(cachedUser) : cachedUser;
         if (!user.is_active) {
           return res.status(401).json({ error: "Account deactivated" });
         }

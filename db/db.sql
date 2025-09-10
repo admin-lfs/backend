@@ -36,3 +36,19 @@ CREATE INDEX idx_users_role ON users(role);
 CREATE INDEX idx_users_active ON users(is_active);
 CREATE INDEX idx_users_org_phone ON users(org_id, phone_number);
 
+CREATE TABLE announcements (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  title VARCHAR(255) NOT NULL,
+  description TEXT NOT NULL,
+  priority VARCHAR(20) DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance
+CREATE INDEX idx_announcements_org_id ON announcements(org_id);
+CREATE INDEX idx_announcements_updated_at ON announcements(updated_at);
+CREATE INDEX idx_announcements_org_updated ON announcements(org_id, updated_at);
+CREATE INDEX idx_announcements_active ON announcements(is_active);
