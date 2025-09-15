@@ -52,3 +52,31 @@ CREATE INDEX idx_announcements_org_id ON announcements(org_id);
 CREATE INDEX idx_announcements_updated_at ON announcements(updated_at);
 CREATE INDEX idx_announcements_org_updated ON announcements(org_id, updated_at);
 CREATE INDEX idx_announcements_active ON announcements(is_active);
+
+CREATE TABLE groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  archived BOOLEAN DEFAULT false,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE user_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  group_id UUID NOT NULL REFERENCES groups(id),
+  archived BOOLEAN DEFAULT false,
+  created_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(user_id, group_id)
+);
+
+CREATE INDEX idx_groups_org ON groups(org_id);
+CREATE INDEX idx_groups_archived ON groups(archived);
+CREATE INDEX idx_groups_updated ON groups(updated_at);
+
+-- User Groups indexes
+CREATE INDEX idx_user_groups_user ON user_groups(user_id);
+CREATE INDEX idx_user_groups_group ON user_groups(group_id);
+CREATE INDEX idx_user_groups_archived ON user_groups(archived);
