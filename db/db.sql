@@ -80,3 +80,55 @@ CREATE INDEX idx_groups_updated ON groups(updated_at);
 CREATE INDEX idx_user_groups_user ON user_groups(user_id);
 CREATE INDEX idx_user_groups_group ON user_groups(group_id);
 CREATE INDEX idx_user_groups_archived ON user_groups(archived);
+
+CREATE TABLE messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL REFERENCES groups(id),
+  user_id UUID NOT NULL REFERENCES users(id),
+  faculty_name VARCHAR(255) NOT NULL,
+  message_content TEXT NOT NULL CHECK (LENGTH(message_content) <= 10000),
+  is_contains_link BOOLEAN DEFAULT false,
+  is_contains_file BOOLEAN DEFAULT false,
+  file_urls JSONB DEFAULT '[]'::jsonb,
+  file_names JSONB DEFAULT '[]'::jsonb,
+  file_sizes JSONB DEFAULT '[]'::jsonb,
+  total_file_size INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Add indexes for performance
+CREATE INDEX idx_messages_group_id ON messages(group_id);
+CREATE INDEX idx_messages_user_id ON messages(user_id);
+CREATE INDEX idx_messages_created_at ON messages(created_at DESC);
+CREATE INDEX idx_messages_contains_link ON messages(is_contains_link) WHERE is_contains_link = true;
+CREATE INDEX idx_messages_contains_file ON messages(is_contains_file) WHERE is_contains_file = true;
+
+
+-- Update messages table to store file paths instead of URLs
+ALTER TABLE messages 
+ALTER COLUMN file_urls TYPE JSONB USING file_urls::jsonb;
+
+-- Set default values
+ALTER TABLE messages 
+ALTER COLUMN file_urls SET DEFAULT '[]'::jsonb;
+
+ALTER TABLE messages 
+ALTER COLUMN file_names SET DEFAULT '[]'::jsonb;
+
+ALTER TABLE messages 
+ALTER COLUMN file_sizes SET DEFAULT '[]'::jsonb;
+
+-- Allow service role to upload files
+CREATE POLICY "Allow service role uploads" ON storage.objects
+FOR INSERT WITH CHECK (
+  bucket_id = 'group-files' 
+  AND auth.role() = 'service_role'
+);
+
+-- Allow service role to generate signed URLs
+CREATE POLICY "Allow service role downloads" ON storage.objects
+FOR SELECT USING (
+  bucket_id = 'group-files' 
+  AND auth.role() = 'service_role'
+);

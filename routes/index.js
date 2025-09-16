@@ -1,12 +1,14 @@
 const express = require("express");
-const router = express.Router();
-
 const authRoutes = require("./auth");
 const userRoutes = require("./user");
 const groupsRoutes = require("./groups");
+const messagesRoutes = require("./messages");
+
+const router = express.Router();
 
 router.use("/auth", authRoutes);
-router.use("/user", userRoutes);
+router.use("/users", userRoutes);
 router.use("/groups", groupsRoutes);
+router.use("/messages", messagesRoutes);
 
 module.exports = router;
