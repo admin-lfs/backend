@@ -78,7 +78,7 @@ router.get("/:groupId", authenticateToken, async (req, res) => {
       .select("id")
       .eq("user_id", targetUserId)
       .eq("group_id", groupId)
-      .eq("archived", false)
+      .eq("is_active", true)
       .single();
 
     if (userGroupError || !userGroup) {
@@ -156,7 +156,7 @@ router.post(
         .select("id")
         .eq("user_id", userId)
         .eq("group_id", groupId)
-        .eq("archived", false)
+        .eq("is_active", true)
         .single();
 
       if (userGroupError || !userGroup) {
@@ -240,15 +240,28 @@ router.post(
       }
 
       // Create message
+      console.log("Creating message with data:", {
+        group_id: groupId,
+        user_id: userId,
+        faculty_name: facultyData.full_name,
+        message_content: message_content,
+        is_contains_link: isContainsLink,
+        is_contains_file: isContainsFile,
+        file_urls: fileUrls,
+        file_names: fileNames,
+        file_sizes: fileSizes,
+        total_file_size: totalFileSize,
+      });
+
       const { data: message, error: messageError } = await supabase
         .from("messages")
         .insert({
           group_id: groupId,
           user_id: userId,
           faculty_name: facultyData.full_name,
-          message_content,
-          is_contains_link,
-          is_contains_file,
+          message_content: message_content,
+          is_contains_link: isContainsLink,
+          is_contains_file: isContainsFile,
           file_urls: fileUrls,
           file_names: fileNames,
           file_sizes: fileSizes,
@@ -259,11 +272,25 @@ router.post(
 
       if (messageError) {
         console.error("Error creating message:", messageError);
+        console.error("Message data that failed:", {
+          group_id: groupId,
+          user_id: userId,
+          faculty_name: facultyData.full_name,
+          message_content: message_content,
+          is_contains_link: isContainsLink,
+          is_contains_file: isContainsFile,
+          file_urls: fileUrls,
+          file_names: fileNames,
+          file_sizes: fileSizes,
+          total_file_size: totalFileSize,
+        });
         return res.status(500).json({
           success: false,
-          message: "Error creating message",
+          message: "Error creating message: " + messageError.message,
         });
       }
+
+      console.log("Message created successfully:", message);
 
       res.json({
         success: true,
@@ -299,7 +326,7 @@ router.get(
         .select("id")
         .eq("user_id", req.user.id)
         .eq("group_id", groupId)
-        .eq("archived", false)
+        .eq("is_active", true)
         .single();
 
       if (userGroupError || !userGroup) {

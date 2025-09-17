@@ -63,14 +63,23 @@ CREATE TABLE groups (
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Recreate user_groups table with clean schema
 CREATE TABLE user_groups (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id),
   group_id UUID NOT NULL REFERENCES groups(id),
-  archived BOOLEAN DEFAULT false,
+  member_type VARCHAR(20) NOT NULL CHECK (member_type IN ('student', 'teacher')),
+  is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(user_id, group_id)
 );
+
+-- Add indexes for performance
+CREATE INDEX idx_user_groups_user ON user_groups(user_id);
+CREATE INDEX idx_user_groups_group ON user_groups(group_id);
+CREATE INDEX idx_user_groups_member_type ON user_groups(member_type);
+CREATE INDEX idx_user_groups_active ON user_groups(is_active);
+CREATE INDEX idx_user_groups_group_active ON user_groups(group_id, is_active);
 
 CREATE INDEX idx_groups_org ON groups(org_id);
 CREATE INDEX idx_groups_archived ON groups(archived);
@@ -132,3 +141,89 @@ FOR SELECT USING (
   bucket_id = 'group-files' 
   AND auth.role() = 'service_role'
 );
+
+
+
+-- 1.2 Exams Management
+CREATE TABLE exams (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL REFERENCES groups(id),
+  exam_name VARCHAR(255) NOT NULL,
+  created_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  is_active BOOLEAN DEFAULT true
+);
+
+CREATE TABLE exam_components (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  exam_id UUID NOT NULL REFERENCES exams(id),
+  component_name VARCHAR(100) NOT NULL,
+  max_marks DECIMAL(10,2) NOT NULL,
+  component_order INTEGER NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 1.3 Grades Management
+CREATE TABLE grades (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  exam_id UUID NOT NULL REFERENCES exams(id),
+  student_id UUID NOT NULL REFERENCES users(id),
+  component_scores JSONB NOT NULL,
+  total_marks DECIMAL(10,2) NOT NULL,
+  added_by UUID NOT NULL REFERENCES users(id),
+  added_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(exam_id, student_id)
+);
+
+-- 1.4 Events Management
+CREATE TABLE events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL REFERENCES groups(id),
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  event_title VARCHAR(255) NOT NULL,
+  event_description TEXT NOT NULL CHECK (LENGTH(event_description) <= 250),
+  event_date DATE NOT NULL,
+  created_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  is_active BOOLEAN DEFAULT true
+);
+
+
+CREATE INDEX idx_exams_group ON exams(group_id);
+CREATE INDEX idx_exam_components_exam ON exam_components(exam_id);
+
+CREATE INDEX idx_grades_exam ON grades(exam_id);
+CREATE INDEX idx_grades_student ON grades(student_id);
+CREATE INDEX idx_grades_added_by ON grades(added_by);
+
+CREATE INDEX idx_events_group ON events(group_id);
+CREATE INDEX idx_events_org ON events(org_id);
+CREATE INDEX idx_events_date ON events(event_date);
+CREATE INDEX idx_events_future ON events(event_date);
+
+-- Remove the group_members table section (lines 137-146) 
+-- Add missing columns to user_groups:
+
+
+ALTER TABLE users ADD COLUMN register_number VARCHAR(50);
+
+-- Create attendance table
+CREATE TABLE attendance (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL REFERENCES groups(id),
+  user_id UUID NOT NULL REFERENCES users(id),
+  attendance_date DATE NOT NULL,
+  status VARCHAR(20) NOT NULL CHECK (status IN ('present', 'absent')),
+  marked_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(group_id, user_id, attendance_date)
+);
+
+-- Add indexes for performance
+CREATE INDEX idx_attendance_group_date ON attendance(group_id, attendance_date);
+CREATE INDEX idx_attendance_user ON attendance(user_id);
+CREATE INDEX idx_attendance_date ON attendance(attendance_date);

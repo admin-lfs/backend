@@ -68,13 +68,12 @@ async function fetchAndReturnGroups(targetUserId, res) {
           id,
           name,
           description,
-          archived,
           updated_at
         )
       `
       )
       .eq("user_id", targetUserId)
-      .eq("archived", false)
+      .eq("is_active", true)
       .eq("groups.archived", false);
 
     if (groupsError) {
@@ -158,7 +157,7 @@ async function fetchSingleGroup(groupId, userId, orgId, res) {
     // First check if group exists and belongs to the org
     const { data: group, error: groupError } = await supabase
       .from("groups")
-      .select("id, name, description, archived, updated_at, org_id")
+      .select("id, name, description, updated_at, org_id")
       .eq("id", groupId)
       .eq("org_id", orgId)
       .eq("archived", false)
@@ -175,7 +174,7 @@ async function fetchSingleGroup(groupId, userId, orgId, res) {
       .select("id")
       .eq("user_id", userId)
       .eq("group_id", groupId)
-      .eq("archived", false)
+      .eq("is_active", true)
       .single();
 
     if (userGroupError || !userGroup) {
