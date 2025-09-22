@@ -238,3 +238,39 @@ ADD COLUMN created_by UUID REFERENCES users(id);
 CREATE INDEX idx_groups_is_default ON groups(is_default);
 CREATE INDEX idx_groups_academic_year ON groups(academic_year);
 CREATE INDEX idx_groups_created_by ON groups(created_by);
+
+ALTER TABLE events 
+ALTER COLUMN event_date TYPE TIMESTAMP;
+
+ALTER TABLE events 
+ADD COLUMN is_deleted BOOLEAN DEFAULT false;
+
+-- Create index for performance
+CREATE INDEX idx_events_is_deleted ON events(is_deleted);
+
+-- Create a function to auto-update updated_at when is_deleted changes
+CREATE OR REPLACE FUNCTION update_events_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create trigger to auto-update updated_at when is_deleted changes
+CREATE TRIGGER trigger_events_updated_at
+    BEFORE UPDATE ON events
+    FOR EACH ROW
+    EXECUTE FUNCTION update_events_updated_at();
+
+-- Now you can soft delete the magicc event
+UPDATE events 
+SET is_deleted = true 
+WHERE event_title ILIKE '%magicc%';
+
+-- Add the missing added_by column to user_groups table
+ALTER TABLE user_groups 
+ADD COLUMN added_by UUID REFERENCES users(id);
+
+-- Add an index for performance
+CREATE INDEX idx_user_groups_added_by ON user_groups(added_by);

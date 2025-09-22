@@ -47,9 +47,22 @@ router.get(
       // Get events for the group
       const { data: events, error: eventsError } = await supabase
         .from("events")
-        .select("*")
+        .select(
+          `
+        id,
+        event_title,
+        event_description,
+        event_date,
+        created_by,
+        created_at,
+        updated_at,
+        is_deleted
+      `
+        )
         .eq("group_id", groupId)
-        .order("event_date", { ascending: true });
+        .eq("is_active", true)
+        .eq("is_deleted", false) // Exclude deleted events
+        .order("event_date", { ascending: false });
 
       if (eventsError) {
         console.error("Error fetching events:", eventsError);
@@ -273,7 +286,14 @@ router.get("/user", authenticateToken, async (req, res) => {
       return parentChildValidator(req, res, async () => {
         try {
           targetUserId = req.validatedChild.childId;
-          await fetchUserEvents(targetUserId, limit, offset, lastUpdated, res);
+          await fetchUserEvents(
+            targetUserId,
+            limit,
+            offset,
+            lastUpdated,
+            res,
+            userOrgId
+          );
         } catch (error) {
           console.error("Error fetching events for child:", error);
           res.status(500).json({ error: "Internal server error" });
@@ -282,7 +302,14 @@ router.get("/user", authenticateToken, async (req, res) => {
     }
 
     // For faculty and students, use their own user ID
-    await fetchUserEvents(targetUserId, limit, offset, lastUpdated, res);
+    await fetchUserEvents(
+      targetUserId,
+      limit,
+      offset,
+      lastUpdated,
+      res,
+      userOrgId
+    );
   } catch (error) {
     console.error("User Events API error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -290,7 +317,7 @@ router.get("/user", authenticateToken, async (req, res) => {
 });
 
 // Helper function to fetch user events
-async function fetchUserEvents(userId, limit, offset, lastUpdated, res) {
+async function fetchUserEvents(userId, limit, offset, lastUpdated, res, orgId) {
   try {
     console.log("fetchUserEvents - User ID:", userId);
 
@@ -320,22 +347,43 @@ async function fetchUserEvents(userId, limit, offset, lastUpdated, res) {
 
     let query = supabase
       .from("events")
-      .select("*")
+      .select(
+        `
+        id,
+        group_id,
+        org_id,
+        event_title,
+        event_description,
+        event_date,
+        created_by,
+        created_at,
+        updated_at,
+        is_active,
+        is_deleted
+      `
+      )
       .in("group_id", groupIds)
+      .eq("org_id", orgId) // Use the passed orgId parameter
       .eq("is_active", true)
       .gte("event_date", today)
-      .order("event_date", { ascending: true });
+      .order("event_date", { ascending: true })
+      .order("created_at", { ascending: false });
 
     // If lastUpdated is provided, only get events newer than that
     if (lastUpdated) {
-      query = query.gt("updated_at", lastUpdated);
+      query = query.gte("updated_at", lastUpdated);
     }
 
-    // Apply limit and offset
-    query = query.range(
-      parseInt(offset),
-      parseInt(offset) + parseInt(limit) - 1
-    );
+    // Apply pagination
+    if (limit) {
+      query = query.limit(parseInt(limit));
+    }
+    if (offset) {
+      query = query.range(
+        parseInt(offset),
+        parseInt(offset) + parseInt(limit) - 1
+      );
+    }
 
     const { data: events, error: eventsError } = await query;
 
@@ -344,27 +392,32 @@ async function fetchUserEvents(userId, limit, offset, lastUpdated, res) {
       return res.status(500).json({ error: "Failed to fetch events" });
     }
 
-    // Get creator names
-    const eventIds = events?.map((event) => event.created_by) || [];
+    // Fetch creator names separately for each event
+    const eventCreatorIds = [
+      ...new Set(events.map((event) => event.created_by)),
+    ];
+
     const { data: creators, error: creatorsError } = await supabase
       .from("users")
       .select("id, full_name")
-      .in("id", eventIds);
+      .in("id", eventCreatorIds);
 
-    // Map creators to events
-    const eventsWithCreators =
-      events?.map((event) => ({
-        ...event,
-        created_by_name:
-          creators?.find((creator) => creator.id === event.created_by)
-            ?.full_name || "Unknown",
-      })) || [];
+    if (creatorsError) {
+      console.error("Error fetching event creators:", creatorsError);
+      // Continue without creator names if there's an error
+    }
 
-    console.log("fetchUserEvents - Found events:", eventsWithCreators.length);
+    // Map creator names to events
+    const eventsWithCreatorNames = events.map((event) => ({
+      ...event,
+      created_by_name:
+        creators?.find((c) => c.id === event.created_by)?.full_name ||
+        "Unknown",
+    }));
 
     res.json({
       success: true,
-      events: eventsWithCreators,
+      events: eventsWithCreatorNames,
     });
   } catch (error) {
     console.error("Error in fetchUserEvents:", error);

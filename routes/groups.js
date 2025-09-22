@@ -1,65 +1,83 @@
 const express = require("express");
 const router = express.Router();
+const supabase = require("../config/supabase");
 const { authenticateToken } = require("../middleware/auth");
 const parentChildValidator = require("../middleware/parentChildValidator");
-const supabase = require("../config/supabase");
 
-// Get groups for a user
+// Helper function to check if user is member of group
+async function isUserMemberOfGroup(userId, groupId, orgId) {
+  try {
+    const { data, error } = await supabase
+      .from("user_groups")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("group_id", groupId)
+      .eq("is_active", true)
+      .single();
+
+    if (error && error.code !== "PGRST116") {
+      console.error("Error checking group membership:", error);
+      return false;
+    }
+
+    return !!data;
+  } catch (error) {
+    console.error("Error in isUserMemberOfGroup:", error);
+    return false;
+  }
+}
+
+// Get user's groups (with parent-child validation)
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { childId } = req.body;
-    const userRole = req.user.role;
-    const userOrgId = req.user.org_id;
-    const userId = req.user.id;
-
+    console.log("Groups API - User role:", req.user.role);
+    console.log("Groups API - User ID:", req.user.id);
     console.log("Groups API - Request body:", req.body);
-    console.log("Groups API - User role:", userRole);
-    console.log("Groups API - User ID:", userId);
-    console.log("Groups API - Child ID:", childId);
 
-    let targetUserId = userId;
+    let targetUserId = req.user.id;
+    let targetOrgId = req.user.org_id;
 
-    // If user is a parent, validate child access using middleware
-    if (userRole === "parent") {
+    // Handle parent requests
+    if (req.user.role === "parent") {
+      const { childId } = req.body;
+      console.log("Groups API - Child ID:", childId);
+
       if (!childId) {
-        // Return empty groups for parents who haven't selected a child
-        console.log(
-          "Groups API - Parent without child ID, returning empty groups"
-        );
-        return res.json({
-          success: true,
-          groups: [],
-          message: "Please select a child to view groups",
+        return res.status(400).json({
+          success: false,
+          message: "Child ID is required for parent users",
         });
       }
 
-      // Use the parent-child validator middleware
-      return parentChildValidator(req, res, async () => {
-        try {
-          targetUserId = req.validatedChild.childId;
-          console.log("Groups API - Validated child ID:", targetUserId);
-          await fetchAndReturnGroups(targetUserId, res);
-        } catch (error) {
-          console.error("Error fetching groups for child:", error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
+      // Validate parent-child relationship
+      const { data: childData, error: childError } = await supabase
+        .from("parent_child_relationships")
+        .select(
+          `
+          child_id,
+          users!parent_child_relationships_child_id_fkey(id, org_id)
+        `
+        )
+        .eq("parent_id", req.user.id)
+        .eq("child_id", childId)
+        .eq("is_active", true)
+        .single();
+
+      if (childError || !childData) {
+        return res.status(403).json({
+          success: false,
+          message: "Child not found or access denied",
+        });
+      }
+
+      targetUserId = childId;
+      targetOrgId = childData.users.org_id;
     }
 
-    // For faculty and students, use their own user ID
     console.log("Groups API - Fetching groups for user:", targetUserId);
-    await fetchAndReturnGroups(targetUserId, res);
-  } catch (error) {
-    console.error("Groups API error:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
 
-// Helper function to fetch and return groups
-async function fetchAndReturnGroups(targetUserId, res) {
-  try {
-    // Get groups for the target user
-    const { data: groups, error: groupsError } = await supabase
+    // Fetch groups for the target user
+    const { data: userGroups, error } = await supabase
       .from("user_groups")
       .select(
         `
@@ -71,206 +89,474 @@ async function fetchAndReturnGroups(targetUserId, res) {
           academic_year,
           is_default,
           created_by,
-          updated_at
+          created_at,
+          updated_at,
+          archived
         )
       `
       )
       .eq("user_id", targetUserId)
       .eq("is_active", true)
-      .eq("groups.archived", false);
+      .eq("groups.archived", false)
+      .eq("groups.org_id", targetOrgId);
 
-    if (groupsError) {
-      console.error("Groups query error:", groupsError);
-      return res.status(500).json({ error: "Failed to fetch groups" });
+    if (error) {
+      console.error("Database error:", error);
+      throw error;
     }
 
-    // Transform the data to match expected format
-    const formattedGroups = groups.map((item) => ({
-      id: item.groups.id,
-      name: item.groups.name,
-      description: item.groups.description,
-      academic_year: item.groups.academic_year,
-      is_default: item.groups.is_default,
-      created_by: item.groups.created_by,
-      updated_at: item.groups.updated_at,
+    // Transform the data
+    const groups = userGroups.map((ug) => ({
+      id: ug.groups.id,
+      name: ug.groups.name,
+      description: ug.groups.description,
+      academic_year: ug.groups.academic_year,
+      is_default: ug.groups.is_default,
+      created_by: ug.groups.created_by,
+      created_at: ug.groups.created_at,
+      updated_at: ug.groups.updated_at,
     }));
 
     res.json({
       success: true,
-      groups: formattedGroups,
+      groups,
     });
   } catch (error) {
-    console.error("Error in fetchAndReturnGroups:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-}
-
-// Get a single group by ID
-router.get("/:groupId", authenticateToken, async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const userRole = req.user.role;
-    const userOrgId = req.user.org_id;
-    const userId = req.user.id;
-
-    console.log("Get single group - Group ID:", groupId);
-    console.log("Get single group - User role:", userRole);
-    console.log("Get single group - User org ID:", userOrgId);
-
-    let targetUserId = userId;
-    let targetOrgId = userOrgId;
-
-    // If user is a parent, get child's org_id
-    if (userRole === "parent") {
-      // Get selected child from request (we'll pass it from frontend)
-      const { childId } = req.query;
-
-      if (!childId) {
-        return res
-          .status(400)
-          .json({ error: "Child ID is required for parents" });
-      }
-
-      // Validate child access
-      return parentChildValidator(req, res, async () => {
-        try {
-          targetUserId = req.validatedChild.childId;
-          targetOrgId = req.validatedChild.orgId;
-
-          await fetchSingleGroup(groupId, targetUserId, targetOrgId, res);
-        } catch (error) {
-          console.error("Error fetching group for child:", error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
-    }
-
-    // For faculty and students, use their own org_id
-    await fetchSingleGroup(groupId, targetUserId, targetOrgId, res);
-  } catch (error) {
-    console.error("Get single group error:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error fetching groups:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch groups",
+    });
   }
 });
 
-// Helper function to fetch single group
-async function fetchSingleGroup(groupId, userId, orgId, res) {
+// SPECIFIC ROUTES FIRST - Get all groups with member counts (for student tab)
+router.get("/available-for-selection", authenticateToken, async (req, res) => {
   try {
-    console.log("fetchSingleGroup - Group ID:", groupId);
-    console.log("fetchSingleGroup - User ID:", userId);
-    console.log("fetchSingleGroup - Org ID:", orgId);
+    if (req.user.role !== "faculty") {
+      return res.status(403).json({
+        success: false,
+        message: "Only faculty can access this",
+      });
+    }
 
-    // First check if group exists and belongs to the org
-    const { data: group, error: groupError } = await supabase
+    const { data: groups, error } = await supabase
       .from("groups")
-      .select("id, name, description, updated_at, org_id")
-      .eq("id", groupId)
-      .eq("org_id", orgId)
+      .select(
+        `
+        id,
+        name,
+        description,
+        user_groups!inner(user_id)
+      `
+      )
+      .eq("org_id", req.user.org_id)
       .eq("archived", false)
-      .single();
+      .eq("user_groups.member_type", "student");
 
-    if (groupError || !group) {
-      console.log("Group not found or doesn't belong to org:", groupError);
-      return res.status(404).json({ error: "Group not found" });
-    }
+    if (error) throw error;
 
-    // Check if user has access to this group
-    const { data: userGroup, error: userGroupError } = await supabase
-      .from("user_groups")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("group_id", groupId)
-      .eq("is_active", true)
-      .single();
-
-    if (userGroupError || !userGroup) {
-      console.log("User doesn't have access to group:", userGroupError);
-      return res.status(403).json({ error: "Access denied to this group" });
-    }
-
-    console.log("Group found and user has access:", group);
+    // Count members for each group
+    const groupsWithCounts = groups.reduce((acc, group) => {
+      const existingGroup = acc.find((g) => g.id === group.id);
+      if (existingGroup) {
+        existingGroup.member_count++;
+      } else {
+        acc.push({
+          id: group.id,
+          name: group.name,
+          description: group.description,
+          member_count: 1,
+        });
+      }
+      return acc;
+    }, []);
 
     res.json({
       success: true,
-      group: {
-        id: group.id,
-        name: group.name,
-        description: group.description,
-        updated_at: group.updated_at,
-      },
+      groups: groupsWithCounts,
     });
   } catch (error) {
-    console.error("Error in fetchSingleGroup:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error fetching groups for selection:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch groups",
+    });
   }
-}
+});
 
-// Create a new group (faculty only)
-router.post("/create", authenticateToken, async (req, res) => {
+// Get all available teachers
+router.get("/available-teachers", authenticateToken, async (req, res) => {
   try {
-    const { name, description, academic_year } = req.body;
-    const userRole = req.user.role;
-    const userOrgId = req.user.org_id;
-    const userId = req.user.id;
-
-    if (userRole !== "faculty") {
-      return res.status(403).json({ error: "Only faculty can create groups" });
+    if (req.user.role !== "faculty") {
+      return res.status(403).json({
+        success: false,
+        message: "Only faculty can access this",
+      });
     }
 
-    if (!name || name.trim().length === 0) {
-      return res.status(400).json({ error: "Group name is required" });
+    const { search } = req.query;
+
+    let query = supabase
+      .from("users")
+      .select("id, full_name")
+      .eq("org_id", req.user.org_id)
+      .eq("role", "faculty")
+      .eq("is_active", true);
+
+    if (search) {
+      query = query.ilike("full_name", `%${search}%`);
     }
 
-    // Create the group
-    const { data: group, error: groupError } = await supabase
+    const { data: teachers, error } = await query.order("full_name");
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      teachers: teachers || [],
+    });
+  } catch (error) {
+    console.error("Error fetching teachers:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch teachers",
+    });
+  }
+});
+
+// Create new group with members
+router.post("/create-with-members", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "faculty") {
+      return res.status(403).json({
+        success: false,
+        message: "Only faculty can create groups",
+      });
+    }
+
+    const {
+      name,
+      description,
+      academic_year,
+      selectedStudents,
+      selectedTeachers,
+    } = req.body;
+
+    // Validation
+    if (!name?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Group name is required",
+      });
+    }
+
+    if (name.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "Group name cannot exceed 50 characters",
+      });
+    }
+
+    if (description && description.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Description cannot exceed 100 characters",
+      });
+    }
+
+    // Check minimum members (creator + at least 1 more)
+    const totalMembers =
+      (selectedStudents?.length || 0) + (selectedTeachers?.length || 0);
+    if (totalMembers === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one member is required",
+      });
+    }
+
+    // Create group
+    const { data: newGroup, error: groupError } = await supabase
       .from("groups")
       .insert({
         name: name.trim(),
         description: description?.trim() || null,
         academic_year: academic_year?.trim() || null,
-        org_id: userOrgId,
-        created_by: userId,
-        is_default: false, // Only admin can set this
+        org_id: req.user.org_id,
+        created_by: req.user.id,
+        is_default: false,
       })
       .select()
       .single();
 
-    if (groupError) {
-      console.error("Group creation error:", groupError);
-      return res.status(500).json({ error: "Failed to create group" });
-    }
+    if (groupError) throw groupError;
 
-    // Add the creator as a teacher in the group
-    const { error: userGroupError } = await supabase
-      .from("user_groups")
-      .insert({
-        user_id: userId,
-        group_id: group.id,
+    // Add creator to group
+    const membersToAdd = [
+      {
+        group_id: newGroup.id,
+        user_id: req.user.id,
         member_type: "teacher",
+        added_by: req.user.id,
         is_active: true,
-      });
+      },
+    ];
 
-    if (userGroupError) {
-      console.error("Error adding creator to group:", userGroupError);
-      // Don't fail the request, just log the error
+    // Add selected students
+    if (selectedStudents?.length > 0) {
+      selectedStudents.forEach((studentId) => {
+        membersToAdd.push({
+          group_id: newGroup.id,
+          user_id: studentId,
+          member_type: "student",
+          added_by: req.user.id,
+          is_active: true,
+        });
+      });
     }
+
+    // Add selected teachers (but exclude the creator to avoid duplicates)
+    if (selectedTeachers?.length > 0) {
+      selectedTeachers.forEach((teacherId) => {
+        // Skip if this teacher is the creator (already added above)
+        if (teacherId !== req.user.id) {
+          membersToAdd.push({
+            group_id: newGroup.id,
+            user_id: teacherId,
+            member_type: "teacher",
+            added_by: req.user.id,
+            is_active: true,
+          });
+        }
+      });
+    }
+
+    // Insert all members
+    const { error: membersError } = await supabase
+      .from("user_groups")
+      .insert(membersToAdd);
+
+    if (membersError) throw membersError;
 
     res.json({
       success: true,
-      group: {
-        id: group.id,
-        name: group.name,
-        description: group.description,
-        academic_year: group.academic_year,
-        is_default: group.is_default,
-        created_by: group.created_by,
-        updated_at: group.updated_at,
-      },
+      message: "Group created successfully",
+      group: newGroup,
     });
   } catch (error) {
-    console.error("Group creation API error:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error creating group:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create group",
+    });
   }
 });
+
+// Get students from specific group
+router.get("/:groupId/students", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "faculty") {
+      return res.status(403).json({
+        success: false,
+        message: "Only faculty can access this",
+      });
+    }
+
+    const { groupId } = req.params;
+
+    const { data: students, error } = await supabase
+      .from("user_groups")
+      .select(
+        `
+        user_id,
+        users!inner(
+          id,
+          full_name,
+          register_number
+        )
+      `
+      )
+      .eq("group_id", groupId)
+      .eq("member_type", "student")
+      .eq("is_active", true);
+
+    if (error) throw error;
+
+    const formattedStudents = students.map((item) => ({
+      id: item.users.id,
+      full_name: item.users.full_name,
+      register_number: item.users.register_number,
+    }));
+
+    res.json({
+      success: true,
+      students: formattedStudents,
+    });
+  } catch (error) {
+    console.error("Error fetching group students:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch students",
+    });
+  }
+});
+
+// Create group (simple version)
+router.post("/create", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "faculty") {
+      return res.status(403).json({
+        success: false,
+        message: "Only faculty can create groups",
+      });
+    }
+
+    const { name, description, academic_year } = req.body;
+
+    if (!name?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Group name is required",
+      });
+    }
+
+    if (name.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "Group name cannot exceed 50 characters",
+      });
+    }
+
+    if (description && description.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Description cannot exceed 100 characters",
+      });
+    }
+
+    const { data: group, error } = await supabase
+      .from("groups")
+      .insert({
+        name: name.trim(),
+        description: description?.trim() || null,
+        academic_year: academic_year?.trim() || null,
+        org_id: req.user.org_id,
+        created_by: req.user.id,
+        is_default: false,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Add creator as a member
+    await supabase.from("user_groups").insert({
+      group_id: group.id,
+      user_id: req.user.id,
+      member_type: "teacher",
+      added_by: req.user.id,
+      is_active: true,
+    });
+
+    res.json({
+      success: true,
+      group,
+    });
+  } catch (error) {
+    console.error("Error creating group:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create group",
+    });
+  }
+});
+
+// GENERIC ROUTES COME LAST - Get single group (with parent-child validation)
+router.get(
+  "/:groupId",
+  authenticateToken,
+  parentChildValidator,
+  async (req, res) => {
+    try {
+      const { groupId } = req.params;
+      const { childId } = req.query;
+
+      console.log("Get single group - Group ID:", groupId);
+      console.log("Get single group - User role:", req.user.role);
+      console.log("Get single group - User org ID:", req.user.org_id);
+
+      let targetUserId = req.user.id;
+      let targetOrgId = req.user.org_id;
+
+      // Handle parent requests
+      if (req.user.role === "parent") {
+        if (!childId) {
+          return res.status(400).json({
+            success: false,
+            message: "Child ID is required for parent users",
+          });
+        }
+
+        // The parentChildValidator middleware has already validated the relationship
+        // and set req.validatedChild
+        if (!req.validatedChild) {
+          return res.status(403).json({
+            success: false,
+            message: "Child not found or access denied",
+          });
+        }
+
+        targetUserId = childId;
+        targetOrgId = req.validatedChild.org_id;
+      }
+
+      console.log("fetchSingleGroup - Group ID:", groupId);
+      console.log("fetchSingleGroup - User ID:", targetUserId);
+      console.log("fetchSingleGroup - Org ID:", targetOrgId);
+
+      // Check if the user is a member of the group
+      const isMember = await isUserMemberOfGroup(
+        targetUserId,
+        groupId,
+        targetOrgId
+      );
+
+      if (!isMember) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not a member of this group",
+        });
+      }
+
+      // Fetch the group details
+      const { data: group, error: groupError } = await supabase
+        .from("groups")
+        .select("*")
+        .eq("id", groupId)
+        .eq("org_id", targetOrgId)
+        .eq("archived", false)
+        .single();
+
+      if (groupError) {
+        console.error("Group not found or doesn't belong to org:", groupError);
+        return res.status(404).json({
+          success: false,
+          message: "Group not found",
+        });
+      }
+
+      res.json({
+        success: true,
+        group,
+      });
+    } catch (error) {
+      console.error("Error fetching single group:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch group",
+      });
+    }
+  }
+);
 
 module.exports = router;
