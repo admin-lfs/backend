@@ -68,6 +68,9 @@ async function fetchAndReturnGroups(targetUserId, res) {
           id,
           name,
           description,
+          academic_year,
+          is_default,
+          created_by,
           updated_at
         )
       `
@@ -86,6 +89,9 @@ async function fetchAndReturnGroups(targetUserId, res) {
       id: item.groups.id,
       name: item.groups.name,
       description: item.groups.description,
+      academic_year: item.groups.academic_year,
+      is_default: item.groups.is_default,
+      created_by: item.groups.created_by,
       updated_at: item.groups.updated_at,
     }));
 
@@ -202,9 +208,10 @@ async function fetchSingleGroup(groupId, userId, orgId, res) {
 // Create a new group (faculty only)
 router.post("/create", authenticateToken, async (req, res) => {
   try {
-    const { name, description } = req.body;
+    const { name, description, academic_year } = req.body;
     const userRole = req.user.role;
     const userOrgId = req.user.org_id;
+    const userId = req.user.id;
 
     if (userRole !== "faculty") {
       return res.status(403).json({ error: "Only faculty can create groups" });
@@ -220,7 +227,10 @@ router.post("/create", authenticateToken, async (req, res) => {
       .insert({
         name: name.trim(),
         description: description?.trim() || null,
+        academic_year: academic_year?.trim() || null,
         org_id: userOrgId,
+        created_by: userId,
+        is_default: false, // Only admin can set this
       })
       .select()
       .single();
@@ -230,12 +240,30 @@ router.post("/create", authenticateToken, async (req, res) => {
       return res.status(500).json({ error: "Failed to create group" });
     }
 
+    // Add the creator as a teacher in the group
+    const { error: userGroupError } = await supabase
+      .from("user_groups")
+      .insert({
+        user_id: userId,
+        group_id: group.id,
+        member_type: "teacher",
+        is_active: true,
+      });
+
+    if (userGroupError) {
+      console.error("Error adding creator to group:", userGroupError);
+      // Don't fail the request, just log the error
+    }
+
     res.json({
       success: true,
       group: {
         id: group.id,
         name: group.name,
         description: group.description,
+        academic_year: group.academic_year,
+        is_default: group.is_default,
+        created_by: group.created_by,
         updated_at: group.updated_at,
       },
     });

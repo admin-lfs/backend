@@ -1,36 +1,38 @@
 const express = require("express");
 const router = express.Router();
 const { authenticateToken } = require("../middleware/auth");
+const parentChildValidator = require("../middleware/parentChildValidator");
 const supabase = require("../config/supabase");
 const ExcelJS = require("exceljs");
 
-// Get all grades for an exam
+// Get grades for a group
 router.get(
-  "/:groupId/exams/:examId/grades",
+  "/:groupId/grades",
   authenticateToken,
+  async (req, res, next) => {
+    // Only apply parentChildValidator for parent users
+    if (req.user.role === "parent") {
+      return parentChildValidator(req, res, next);
+    }
+    next();
+  },
   async (req, res) => {
     try {
-      const { groupId, examId } = req.params;
+      const { groupId } = req.params;
       const userRole = req.user.role;
       const userId = req.user.id;
 
-      // For parents, get child context
       let targetUserId = userId;
+
+      // If user is a parent, use validated child
       if (userRole === "parent") {
-        const { childId } = req.query;
-        if (!childId) {
-          return res.status(400).json({
-            success: false,
-            message: "Child ID is required for parent users",
-          });
-        }
-        targetUserId = childId;
+        targetUserId = req.validatedChild.childId;
       }
 
-      // Check access to group
+      // Check if user has access to this group
       const { data: userGroup, error: userGroupError } = await supabase
         .from("user_groups")
-        .select("id")
+        .select("id, member_type")
         .eq("user_id", targetUserId)
         .eq("group_id", groupId)
         .eq("is_active", true)
@@ -43,66 +45,82 @@ router.get(
         });
       }
 
-      // Get exam details
-      const { data: exam, error: examError } = await supabase
-        .from("exams")
-        .select(
-          `
-        *,
-        exam_components!inner(*)
-      `
-        )
-        .eq("id", examId)
-        .eq("group_id", groupId)
-        .single();
+      // For students and parents, only show their own grades
+      if (userRole === "student" || userRole === "parent") {
+        const { data: grades, error: gradesError } = await supabase
+          .from("grades")
+          .select(
+            `
+          *,
+          exams!grades_exam_id_fkey(
+            id,
+            title,
+            total_marks,
+            exam_components
+          )
+        `
+          )
+          .eq("student_id", targetUserId)
+          .eq("exams.group_id", groupId)
+          .order("created_at", { ascending: false });
 
-      if (examError || !exam) {
-        return res.status(404).json({
-          success: false,
-          message: "Exam not found",
+        if (gradesError) {
+          console.error("Error fetching grades:", gradesError);
+          return res.status(500).json({
+            success: false,
+            message: "Error fetching grades",
+          });
+        }
+
+        return res.json({
+          success: true,
+          grades: grades || [],
         });
       }
 
-      let gradesQuery = supabase
-        .from("grades")
-        .select(
-          `
-        *,
-        student:users!grades_student_id_fkey(full_name),
-        added_by_user:users!grades_added_by_fkey(full_name)
-      `
-        )
-        .eq("exam_id", examId);
+      // For teachers, show all grades in the group
+      if (userRole === "faculty") {
+        const { data: grades, error: gradesError } = await supabase
+          .from("grades")
+          .select(
+            `
+          *,
+          exams!grades_exam_id_fkey(
+            id,
+            title,
+            total_marks,
+            exam_components
+          ),
+          users!grades_student_id_fkey(
+            id,
+            full_name,
+            register_number
+          )
+        `
+          )
+          .eq("exams.group_id", groupId)
+          .order("created_at", { ascending: false });
 
-      // For students, only show their own grades
-      if (userRole === "student") {
-        gradesQuery = gradesQuery.eq("student_id", userId);
-      }
-      // For parents, only show their child's grades
-      else if (userRole === "parent") {
-        gradesQuery = gradesQuery.eq("student_id", targetUserId);
-      }
+        if (gradesError) {
+          console.error("Error fetching grades:", gradesError);
+          return res.status(500).json({
+            success: false,
+            message: "Error fetching grades",
+          });
+        }
 
-      const { data: grades, error: gradesError } = await gradesQuery.order(
-        "added_at",
-        { ascending: false }
-      );
-
-      if (gradesError) {
-        console.error("Error fetching grades:", gradesError);
-        return res.status(500).json({
-          success: false,
-          message: "Error fetching grades",
+        return res.json({
+          success: true,
+          grades: grades || [],
         });
       }
 
-      res.json({
-        success: true,
-        exam: exam,
-        grades: grades || [],
+      return res.status(403).json({
+        success: false,
+        message: "Invalid user role",
       });
     } catch (error) {
-      console.error("Error fetching grades:", error);
+      console.error("Error in get grades:", error);
       res.status(500).json({
         success: false,
         message: "Internal server error",

@@ -2,12 +2,36 @@ const express = require("express");
 const router = express.Router();
 const { authenticateToken } = require("../middleware/auth");
 const parentChildValidator = require("../middleware/parentChildValidator");
+const rateLimiter = require("../middleware/rateLimiter");
+const fileUploadRateLimiter = require("../middleware/fileUploadRateLimiter");
 const supabase = require("../config/supabase");
 const multer = require("multer");
 const path = require("path");
 
 // Configure multer for memory storage (for Supabase upload)
 const storage = multer.memoryStorage();
+
+// File signature validation
+const fileSignatures = {
+  "image/jpeg": [0xff, 0xd8, 0xff],
+  "image/png": [0x89, 0x50, 0x4e, 0x47],
+  "application/pdf": [0x25, 0x50, 0x44, 0x46],
+};
+
+function validateFileSignature(buffer, mimeType) {
+  const signature = fileSignatures[mimeType];
+  if (!signature) return false;
+
+  for (let i = 0; i < signature.length; i++) {
+    if (buffer[i] !== signature[i]) return false;
+  }
+  return true;
+}
+
+function sanitizeFileName(originalName) {
+  return originalName.replace(/[^a-zA-Z0-9.-]/g, "_").substring(0, 100); // Limit length
+}
+
 const upload = multer({
   storage: storage,
   limits: {
@@ -32,129 +56,36 @@ const upload = multer({
 });
 
 // Get messages for a group
-router.get("/:groupId", authenticateToken, async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { page = 1, limit = 25 } = req.query;
-    const userRole = req.user.role;
-    const userId = req.user.id;
-    const userOrgId = req.user.org_id;
-
-    let targetUserId = userId;
-    let targetOrgId = userOrgId;
-
-    // For parents, validate child access
-    if (userRole === "parent") {
-      const { childId } = req.query;
-      if (!childId) {
-        return res.status(400).json({
-          success: false,
-          message: "Child ID is required for parent users",
-        });
-      }
-
-      // Validate parent-child relationship
-      const { data: childData, error: childError } = await supabase
-        .from("users")
-        .select("id, org_id, parent_id")
-        .eq("id", childId)
-        .eq("parent_id", userId)
-        .single();
-
-      if (childError || !childData) {
-        return res.status(403).json({
-          success: false,
-          message: "Invalid child ID or access denied",
-        });
-      }
-
-      targetUserId = childData.id;
-      targetOrgId = childData.org_id;
-    }
-
-    // Check if user has access to this group
-    const { data: userGroup, error: userGroupError } = await supabase
-      .from("user_groups")
-      .select("id")
-      .eq("user_id", targetUserId)
-      .eq("group_id", groupId)
-      .eq("is_active", true)
-      .single();
-
-    if (userGroupError || !userGroup) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied to this group",
-      });
-    }
-
-    // Get messages with pagination
-    const offset = (page - 1) * limit;
-    const { data: messages, error: messagesError } = await supabase
-      .from("messages")
-      .select("*")
-      .eq("group_id", groupId)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (messagesError) {
-      console.error("Error fetching messages:", messagesError);
-      return res.status(500).json({
-        success: false,
-        message: "Error fetching messages",
-      });
-    }
-
-    res.json({
-      success: true,
-      messages: messages || [],
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        hasMore: messages.length === parseInt(limit),
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching messages:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
-});
-
-// Send message (faculty only)
-router.post(
+router.get(
   "/:groupId",
+  rateLimiter, // Regular rate limiter for GET requests
   authenticateToken,
-  upload.array("files", 10),
+  async (req, res, next) => {
+    // Only apply parentChildValidator for parent users
+    if (req.user.role === "parent") {
+      return parentChildValidator(req, res, next);
+    }
+    next();
+  },
   async (req, res) => {
     try {
       const { groupId } = req.params;
-      const { message_content } = req.body;
+      const { page = 1, limit = 25 } = req.query;
       const userRole = req.user.role;
       const userId = req.user.id;
 
-      if (userRole !== "faculty") {
-        return res.status(403).json({
-          success: false,
-          message: "Only faculty can send messages",
-        });
+      let targetUserId = userId;
+
+      // If user is a parent, use validated child
+      if (userRole === "parent") {
+        targetUserId = req.validatedChild.childId;
       }
 
-      if (!message_content || message_content.length > 10000) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Message content is required and must be less than 10000 characters",
-        });
-      }
-
-      // Check if faculty has access to this group
+      // Check if user has access to this group
       const { data: userGroup, error: userGroupError } = await supabase
         .from("user_groups")
         .select("id")
-        .eq("user_id", userId)
+        .eq("user_id", targetUserId)
         .eq("group_id", groupId)
         .eq("is_active", true)
         .single();
@@ -166,136 +97,239 @@ router.post(
         });
       }
 
-      // Process files and upload to Supabase Storage
-      const files = req.files || [];
-      let fileUrls = [];
-      let fileNames = [];
-      let fileSizes = [];
-      let totalFileSize = 0;
-      let isContainsFile = false;
+      const offset = (page - 1) * limit;
 
-      if (files.length > 0) {
-        isContainsFile = true;
-        totalFileSize = files.reduce((sum, file) => sum + file.size, 0);
+      // Get messages with pagination - FIXED: use user_id instead of sender_id
+      const { data: messages, error: messagesError } = await supabase
+        .from("messages")
+        .select(
+          `
+        *,
+        users!messages_user_id_fkey(full_name, role)
+      `
+        )
+        .eq("group_id", groupId)
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
 
-        if (totalFileSize > 50 * 1024 * 1024) {
-          // 50MB limit
+      if (messagesError) {
+        console.error("Error fetching messages:", messagesError);
+        return res.status(500).json({
+          success: false,
+          message: "Error fetching messages",
+        });
+      }
+
+      // Get total count for pagination
+      const { count, error: countError } = await supabase
+        .from("messages")
+        .select("*", { count: "exact", head: true })
+        .eq("group_id", groupId);
+
+      if (countError) {
+        console.error("Error fetching message count:", countError);
+      }
+
+      res.json({
+        success: true,
+        messages: messages || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          totalPages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error in get messages:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error",
+      });
+    }
+  }
+);
+
+// Send message to group (faculty only) - WITH FILE UPLOAD RATE LIMITING
+router.post(
+  "/:groupId",
+  authenticateToken,
+  fileUploadRateLimiter, // Apply file upload rate limiter BEFORE multer
+  upload.array("files", 10),
+  async (req, res) => {
+    try {
+      const { groupId } = req.params;
+      const { content } = req.body;
+      const userId = req.user.id;
+      const userRole = req.user.role;
+
+      // Only faculty can send messages
+      if (userRole !== "faculty") {
+        return res.status(403).json({
+          success: false,
+          message: "Only faculty can send messages",
+        });
+      }
+
+      // Check if user is a teacher in this group
+      const { data: userGroup, error: userGroupError } = await supabase
+        .from("user_groups")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("group_id", groupId)
+        .eq("member_type", "teacher")
+        .eq("is_active", true)
+        .single();
+
+      if (userGroupError || !userGroup) {
+        return res.status(403).json({
+          success: false,
+          message: "Only teachers can send messages",
+        });
+      }
+
+      if (!content || content.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Message content is required",
+        });
+      }
+
+      // Pre-validate file sizes and count BEFORE upload
+      if (req.files && req.files.length > 0) {
+        // Check total file size limit BEFORE upload
+        const totalSize = req.files.reduce((sum, file) => sum + file.size, 0);
+        if (totalSize > 50 * 1024 * 1024) {
           return res.status(400).json({
             success: false,
             message: "Total file size cannot exceed 50MB",
           });
         }
 
-        // Upload files to Supabase Storage
-        for (const file of files) {
-          const fileName = `${Date.now()}-${Math.round(
-            Math.random() * 1e9
-          )}${path.extname(file.originalname)}`;
-          const filePath = `groups/${groupId}/${fileName}`;
-
-          // Determine content type based on file extension
-          let contentType = "application/pdf";
-          if (file.mimetype.startsWith("image/")) {
-            contentType = file.mimetype;
-          }
-
-          const { data: uploadData, error: uploadError } =
-            await supabase.storage
-              .from("group-files")
-              .upload(filePath, file.buffer, {
-                contentType: contentType,
-                upsert: false,
-              });
-
-          if (uploadError) {
+        // Validate file signatures for security
+        for (const file of req.files) {
+          if (!validateFileSignature(file.buffer, file.mimetype)) {
             return res.status(400).json({
               success: false,
-              message: `Failed to upload file ${file.originalname}: ${uploadError.message}`,
+              message: `Invalid file format detected: ${file.originalname}`,
             });
           }
-
-          // Store file path instead of public URL
-          fileUrls.push(filePath);
-          fileNames.push(file.originalname);
-          fileSizes.push(file.size);
         }
       }
 
-      // Check for links in message content
-      const linkRegex = /(https?:\/\/[^\s]+)/g;
-      const isContainsLink = linkRegex.test(message_content);
+      // Handle file uploads
+      let fileUrls = [];
+      let fileNames = [];
+      let fileSizes = [];
+      let totalFileSize = 0;
+      let uploadedFiles = []; // Track uploaded files for cleanup on error
 
-      // Get faculty name
-      const { data: facultyData, error: facultyError } = await supabase
-        .from("users")
-        .select("full_name")
-        .eq("id", userId)
-        .single();
+      try {
+        if (req.files && req.files.length > 0) {
+          // Upload files to Supabase Storage
+          for (const file of req.files) {
+            const sanitizedName = sanitizeFileName(file.originalname);
+            const fileName = `${Date.now()}-${Math.random()
+              .toString(36)
+              .substring(7)}-${sanitizedName}`;
+            const filePath = `group-files/${groupId}/${fileName}`;
 
-      if (facultyError || !facultyData) {
+            const { data: uploadData, error: uploadError } =
+              await supabase.storage
+                .from("group-files")
+                .upload(filePath, file.buffer, {
+                  contentType: file.mimetype,
+                });
+
+            if (uploadError) {
+              console.error("Error uploading file:", uploadError);
+
+              // Cleanup already uploaded files
+              for (const uploadedFile of uploadedFiles) {
+                try {
+                  await supabase.storage
+                    .from("group-files")
+                    .remove([uploadedFile]);
+                } catch (cleanupError) {
+                  console.error("Error cleaning up file:", cleanupError);
+                }
+              }
+
+              return res.status(500).json({
+                success: false,
+                message: "Error uploading files",
+              });
+            }
+
+            uploadedFiles.push(filePath);
+            fileUrls.push(filePath);
+            fileNames.push(file.originalname);
+            fileSizes.push(file.size);
+            totalFileSize += file.size;
+          }
+        }
+
+        // Check for links in content
+        const linkRegex = /(https?:\/\/[^\s]+)/g;
+        const isContainsLink = linkRegex.test(content);
+
+        // Create message
+        const { data: message, error: messageError } = await supabase
+          .from("messages")
+          .insert({
+            group_id: groupId,
+            user_id: userId,
+            faculty_name: req.user.full_name,
+            message_content: content.trim(),
+            is_contains_link: isContainsLink,
+            is_contains_file: fileUrls.length > 0,
+            file_urls: fileUrls,
+            file_names: fileNames,
+            file_sizes: fileSizes,
+            total_file_size: totalFileSize,
+          })
+          .select(`*, users!messages_user_id_fkey(full_name, role)`)
+          .single();
+
+        if (messageError) {
+          console.error("Error creating message:", messageError);
+
+          // Cleanup uploaded files on database error
+          for (const uploadedFile of uploadedFiles) {
+            try {
+              await supabase.storage.from("group-files").remove([uploadedFile]);
+            } catch (cleanupError) {
+              console.error("Error cleaning up file:", cleanupError);
+            }
+          }
+
+          return res.status(500).json({
+            success: false,
+            message: "Error creating message",
+          });
+        }
+
+        res.json({
+          success: true,
+          message: message,
+        });
+      } catch (uploadError) {
+        console.error("File upload process error:", uploadError);
+
+        // Cleanup uploaded files on any error
+        for (const uploadedFile of uploadedFiles) {
+          try {
+            await supabase.storage.from("group-files").remove([uploadedFile]);
+          } catch (cleanupError) {
+            console.error("Error cleaning up file:", cleanupError);
+          }
+        }
+
         return res.status(500).json({
           success: false,
-          message: "Error fetching faculty information",
+          message: "Error processing file uploads",
         });
       }
-
-      // Create message
-      console.log("Creating message with data:", {
-        group_id: groupId,
-        user_id: userId,
-        faculty_name: facultyData.full_name,
-        message_content: message_content,
-        is_contains_link: isContainsLink,
-        is_contains_file: isContainsFile,
-        file_urls: fileUrls,
-        file_names: fileNames,
-        file_sizes: fileSizes,
-        total_file_size: totalFileSize,
-      });
-
-      const { data: message, error: messageError } = await supabase
-        .from("messages")
-        .insert({
-          group_id: groupId,
-          user_id: userId,
-          faculty_name: facultyData.full_name,
-          message_content: message_content,
-          is_contains_link: isContainsLink,
-          is_contains_file: isContainsFile,
-          file_urls: fileUrls,
-          file_names: fileNames,
-          file_sizes: fileSizes,
-          total_file_size: totalFileSize,
-        })
-        .select()
-        .single();
-
-      if (messageError) {
-        console.error("Error creating message:", messageError);
-        console.error("Message data that failed:", {
-          group_id: groupId,
-          user_id: userId,
-          faculty_name: facultyData.full_name,
-          message_content: message_content,
-          is_contains_link: isContainsLink,
-          is_contains_file: isContainsFile,
-          file_urls: fileUrls,
-          file_names: fileNames,
-          file_sizes: fileSizes,
-          total_file_size: totalFileSize,
-        });
-        return res.status(500).json({
-          success: false,
-          message: "Error creating message: " + messageError.message,
-        });
-      }
-
-      console.log("Message created successfully:", message);
-
-      res.json({
-        success: true,
-        message: message,
-      });
     } catch (error) {
       console.error("Error sending message:", error);
       res.status(500).json({
@@ -310,21 +344,32 @@ router.post(
 router.get(
   "/:groupId/files/:messageId",
   authenticateToken,
+  async (req, res, next) => {
+    // Only apply parentChildValidator for parent users
+    if (req.user.role === "parent") {
+      return parentChildValidator(req, res, next);
+    }
+    next();
+  },
   async (req, res) => {
     try {
       const { groupId, messageId } = req.params;
-      const { fileIndex, childId } = req.query;
+      const { fileIndex } = req.query;
+      const userRole = req.user.role;
+      const userId = req.user.id;
 
-      // Validate parent-child relationship if childId provided
-      if (childId) {
-        await parentChildValidator(req, res, () => {});
+      let targetUserId = userId;
+
+      // If user is a parent, use validated child
+      if (userRole === "parent") {
+        targetUserId = req.validatedChild.childId;
       }
 
       // Check if user has access to this group
       const { data: userGroup, error: userGroupError } = await supabase
         .from("user_groups")
         .select("id")
-        .eq("user_id", req.user.id)
+        .eq("user_id", targetUserId)
         .eq("group_id", groupId)
         .eq("is_active", true)
         .single();
@@ -336,7 +381,7 @@ router.get(
         });
       }
 
-      // Get message from database
+      // Get message
       const { data: message, error: messageError } = await supabase
         .from("messages")
         .select("file_urls, file_names")
@@ -351,6 +396,13 @@ router.get(
         });
       }
 
+      if (!message.file_urls || !Array.isArray(message.file_urls)) {
+        return res.status(404).json({
+          success: false,
+          message: "No files found in this message",
+        });
+      }
+
       const fileIndexNum = parseInt(fileIndex);
       if (fileIndexNum < 0 || fileIndexNum >= message.file_urls.length) {
         return res.status(400).json({
@@ -362,25 +414,27 @@ router.get(
       const filePath = message.file_urls[fileIndexNum];
       const fileName = message.file_names[fileIndexNum];
 
-      // Generate signed URL (expires in 1 hour)
-      const { data: signedUrl, error: urlError } = await supabase.storage
-        .from("group-files")
-        .createSignedUrl(filePath, 3600);
+      // Generate signed URL for file download
+      const { data: signedUrlData, error: signedUrlError } =
+        await supabase.storage
+          .from("group-files")
+          .createSignedUrl(filePath, 3600); // 1 hour expiry
 
-      if (urlError) {
+      if (signedUrlError) {
+        console.error("Error generating signed URL:", signedUrlError);
         return res.status(500).json({
           success: false,
-          message: "Failed to generate file URL",
+          message: "Error generating download URL",
         });
       }
 
       res.json({
         success: true,
-        fileUrl: signedUrl.signedUrl,
+        fileUrl: signedUrlData.signedUrl,
         fileName: fileName,
       });
     } catch (error) {
-      console.error("Error getting file URL:", error);
+      console.error("Error in get file download URL:", error);
       res.status(500).json({
         success: false,
         message: "Internal server error",

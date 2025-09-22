@@ -227,3 +227,14 @@ CREATE TABLE attendance (
 CREATE INDEX idx_attendance_group_date ON attendance(group_id, attendance_date);
 CREATE INDEX idx_attendance_user ON attendance(user_id);
 CREATE INDEX idx_attendance_date ON attendance(attendance_date);
+
+-- Add new fields to groups table
+ALTER TABLE groups 
+ADD COLUMN is_default BOOLEAN DEFAULT false,
+ADD COLUMN academic_year VARCHAR(50),
+ADD COLUMN created_by UUID REFERENCES users(id);
+
+-- Add index for performance
+CREATE INDEX idx_groups_is_default ON groups(is_default);
+CREATE INDEX idx_groups_academic_year ON groups(academic_year);
+CREATE INDEX idx_groups_created_by ON groups(created_by);

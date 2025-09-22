@@ -1,82 +1,106 @@
 const express = require("express");
 const router = express.Router();
 const { authenticateToken } = require("../middleware/auth");
+const parentChildValidator = require("../middleware/parentChildValidator");
 const supabase = require("../config/supabase");
 
 // Get events for a group
-router.get("/:groupId/events", authenticateToken, async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { page = 1, limit = 20, from_date, to_date } = req.query;
-    const offset = (page - 1) * limit;
+router.get(
+  "/:groupId/events",
+  authenticateToken,
+  async (req, res, next) => {
+    // Only apply parentChildValidator for parent users
+    if (req.user.role === "parent") {
+      return parentChildValidator(req, res, next);
+    }
+    next();
+  },
+  async (req, res) => {
+    try {
+      const { groupId } = req.params;
+      const userRole = req.user.role;
+      const userId = req.user.id;
 
-    // Check access to group
-    const { data: userGroup, error: userGroupError } = await supabase
-      .from("user_groups")
-      .select("id")
-      .eq("user_id", req.user.id)
-      .eq("group_id", groupId)
-      .eq("is_active", true)
-      .single();
+      let targetUserId = userId;
 
-    if (userGroupError || !userGroup) {
-      return res.status(403).json({
+      // If user is a parent, use validated child
+      if (userRole === "parent") {
+        targetUserId = req.validatedChild.childId;
+      }
+
+      // Check if user has access to this group
+      const { data: userGroup, error: userGroupError } = await supabase
+        .from("user_groups")
+        .select("id, member_type")
+        .eq("user_id", targetUserId)
+        .eq("group_id", groupId)
+        .eq("is_active", true)
+        .single();
+
+      if (userGroupError || !userGroup) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to this group",
+        });
+      }
+
+      // Get events for the group
+      const { data: events, error: eventsError } = await supabase
+        .from("events")
+        .select("*")
+        .eq("group_id", groupId)
+        .order("event_date", { ascending: true });
+
+      if (eventsError) {
+        console.error("Error fetching events:", eventsError);
+        return res.status(500).json({
+          success: false,
+          message: "Error fetching events",
+        });
+      }
+
+      console.log("🔍 Group events fetched:", events?.length || 0);
+      console.log("🔍 Sample event created_by:", events?.[0]?.created_by);
+
+      // Get creator names separately
+      const eventIds = events?.map((event) => event.created_by) || [];
+      console.log("🔍 Event creator IDs:", eventIds);
+
+      const { data: creators, error: creatorsError } = await supabase
+        .from("users")
+        .select("id, full_name")
+        .in("id", eventIds);
+
+      console.log("🔍 Creators query result:", { creators, creatorsError });
+
+      // Map creator names to events
+      const eventsWithCreators =
+        events?.map((event) => {
+          const creator = creators?.find(
+            (creator) => creator.id === event.created_by
+          );
+          console.log(`🔍 Event ${event.id} creator:`, creator);
+          return {
+            ...event,
+            created_by_name: creator?.full_name || "Unknown",
+          };
+        }) || [];
+
+      console.log("🔍 Final events with creators:", eventsWithCreators);
+
+      res.json({
+        success: true,
+        events: eventsWithCreators,
+      });
+    } catch (error) {
+      console.error("Error in get events:", error);
+      res.status(500).json({
         success: false,
-        message: "Access denied to this group",
+        message: "Internal server error",
       });
     }
-
-    let query = supabase
-      .from("events")
-      .select(
-        `
-        *,
-        created_by_user:users!events_created_by_fkey(full_name)
-      `
-      )
-      .eq("group_id", groupId)
-      .eq("is_active", true);
-
-    // Only show future events by default
-    if (!from_date) {
-      query = query.gte("event_date", new Date().toISOString().split("T")[0]);
-    } else {
-      query = query.gte("event_date", from_date);
-    }
-
-    if (to_date) {
-      query = query.lte("event_date", to_date);
-    }
-
-    const { data: events, error } = await query
-      .range(offset, offset + limit - 1)
-      .order("event_date", { ascending: true });
-
-    if (error) {
-      console.error("Error fetching events:", error);
-      return res.status(500).json({
-        success: false,
-        message: "Error fetching events",
-      });
-    }
-
-    res.json({
-      success: true,
-      events: events || [],
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        hasMore: events.length === parseInt(limit),
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching events:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
   }
-});
+);
 
 // Create new event
 router.post("/:groupId/events", authenticateToken, async (req, res) => {
@@ -163,8 +187,7 @@ router.get("/org/:orgId", authenticateToken, async (req, res) => {
       .select(
         `
         *,
-        groups!inner(name),
-        created_by_user:users!events_created_by_fkey(full_name)
+        groups!inner(name)
       `
       )
       .eq("org_id", orgId)
@@ -189,13 +212,29 @@ router.get("/org/:orgId", authenticateToken, async (req, res) => {
       });
     }
 
+    // Get creator names separately to avoid foreign key issues
+    const eventIds = events?.map((event) => event.created_by) || [];
+    const { data: creators, error: creatorsError } = await supabase
+      .from("users")
+      .select("id, full_name")
+      .in("id", eventIds);
+
+    // Map creator names to events
+    const eventsWithCreators =
+      events?.map((event) => ({
+        ...event,
+        created_by_name:
+          creators?.find((creator) => creator.id === event.created_by)
+            ?.full_name || "Unknown",
+      })) || [];
+
     res.json({
       success: true,
-      events: events || [],
+      events: eventsWithCreators,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
-        hasMore: events.length === parseInt(limit),
+        hasMore: events?.length === parseInt(limit),
       },
     });
   } catch (error) {
@@ -206,5 +245,131 @@ router.get("/org/:orgId", authenticateToken, async (req, res) => {
     });
   }
 });
+
+// Get all events for a user (from all their groups)
+router.get("/user", authenticateToken, async (req, res) => {
+  try {
+    const { limit = 25, offset = 0, lastUpdated } = req.query;
+    const userRole = req.user.role;
+    const userOrgId = req.user.org_id;
+    const userId = req.user.id;
+
+    console.log("User Events API - User role:", userRole);
+    console.log("User Events API - User org ID:", userOrgId);
+
+    let targetUserId = userId;
+
+    // If user is a parent, get child's details
+    if (userRole === "parent") {
+      const { childId } = req.query;
+
+      if (!childId) {
+        return res.status(400).json({
+          error: "Child ID is required for parents",
+        });
+      }
+
+      // Validate child access
+      return parentChildValidator(req, res, async () => {
+        try {
+          targetUserId = req.validatedChild.childId;
+          await fetchUserEvents(targetUserId, limit, offset, lastUpdated, res);
+        } catch (error) {
+          console.error("Error fetching events for child:", error);
+          res.status(500).json({ error: "Internal server error" });
+        }
+      });
+    }
+
+    // For faculty and students, use their own user ID
+    await fetchUserEvents(targetUserId, limit, offset, lastUpdated, res);
+  } catch (error) {
+    console.error("User Events API error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Helper function to fetch user events
+async function fetchUserEvents(userId, limit, offset, lastUpdated, res) {
+  try {
+    console.log("fetchUserEvents - User ID:", userId);
+
+    // Get user's groups first
+    const { data: userGroups, error: groupsError } = await supabase
+      .from("user_groups")
+      .select("group_id")
+      .eq("user_id", userId)
+      .eq("is_active", true);
+
+    if (groupsError) {
+      console.error("User groups query error:", groupsError);
+      return res.status(500).json({ error: "Failed to fetch user groups" });
+    }
+
+    if (!userGroups || userGroups.length === 0) {
+      return res.json({
+        success: true,
+        events: [],
+      });
+    }
+
+    const groupIds = userGroups.map((ug) => ug.group_id);
+
+    // Get events from user's groups (only future events)
+    const today = new Date().toISOString().split("T")[0];
+
+    let query = supabase
+      .from("events")
+      .select("*")
+      .in("group_id", groupIds)
+      .eq("is_active", true)
+      .gte("event_date", today)
+      .order("event_date", { ascending: true });
+
+    // If lastUpdated is provided, only get events newer than that
+    if (lastUpdated) {
+      query = query.gt("updated_at", lastUpdated);
+    }
+
+    // Apply limit and offset
+    query = query.range(
+      parseInt(offset),
+      parseInt(offset) + parseInt(limit) - 1
+    );
+
+    const { data: events, error: eventsError } = await query;
+
+    if (eventsError) {
+      console.error("Events query error:", eventsError);
+      return res.status(500).json({ error: "Failed to fetch events" });
+    }
+
+    // Get creator names
+    const eventIds = events?.map((event) => event.created_by) || [];
+    const { data: creators, error: creatorsError } = await supabase
+      .from("users")
+      .select("id, full_name")
+      .in("id", eventIds);
+
+    // Map creators to events
+    const eventsWithCreators =
+      events?.map((event) => ({
+        ...event,
+        created_by_name:
+          creators?.find((creator) => creator.id === event.created_by)
+            ?.full_name || "Unknown",
+      })) || [];
+
+    console.log("fetchUserEvents - Found events:", eventsWithCreators.length);
+
+    res.json({
+      success: true,
+      events: eventsWithCreators,
+    });
+  } catch (error) {
+    console.error("Error in fetchUserEvents:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
 
 module.exports = router;
