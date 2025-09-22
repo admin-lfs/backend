@@ -274,3 +274,14 @@ ADD COLUMN added_by UUID REFERENCES users(id);
 
 -- Add an index for performance
 CREATE INDEX idx_user_groups_added_by ON user_groups(added_by);
+
+-- Update the member_type constraint to include 'faculty'
+ALTER TABLE user_groups 
+DROP CONSTRAINT user_groups_member_type_check;
+
+ALTER TABLE user_groups 
+ADD CONSTRAINT user_groups_member_type_check 
+CHECK (member_type IN ('student', 'teacher', 'faculty'));
+
+
+ALTER TABLE groups ADD COLUMN last_message_at TIMESTAMP;

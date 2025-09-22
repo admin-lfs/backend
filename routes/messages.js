@@ -158,8 +158,25 @@ router.post(
   upload.array("files", 10),
   async (req, res) => {
     try {
+      console.log("=== MESSAGE CREATION DEBUG ===");
+      console.log("Group ID:", req.params.groupId);
+      console.log("User ID:", req.user.id);
+      console.log("User Role:", req.user.role);
+      console.log("Request Body:", req.body);
+      console.log("Files:", req.files ? req.files.length : 0);
+      console.log("Content:", req.body.content);
+      console.log(
+        "Content Length:",
+        req.body.content ? req.body.content.length : 0
+      );
+      console.log(
+        "Content Trimmed Length:",
+        req.body.content ? req.body.content.trim().length : 0
+      );
+
       const { groupId } = req.params;
-      const { content } = req.body;
+      const { content, message_content } = req.body;
+      const messageContent = content || message_content;
       const userId = req.user.id;
       const userRole = req.user.role;
 
@@ -188,18 +205,29 @@ router.post(
         });
       }
 
-      if (!content || content.trim().length === 0) {
+      // Validate message content
+      if (
+        (!messageContent || messageContent.trim().length === 0) &&
+        (!req.files || req.files.length === 0)
+      ) {
+        console.log("ERROR: Message content or file is required");
         return res.status(400).json({
           success: false,
-          message: "Message content is required",
+          message: "Message content or file is required",
         });
       }
 
       // Pre-validate file sizes and count BEFORE upload
       if (req.files && req.files.length > 0) {
+        console.log("Validating files...");
+        console.log("Number of files:", req.files.length);
+
         // Check total file size limit BEFORE upload
         const totalSize = req.files.reduce((sum, file) => sum + file.size, 0);
+        console.log("Total file size:", totalSize, "bytes");
+
         if (totalSize > 50 * 1024 * 1024) {
+          console.log("ERROR: Total file size exceeds 50MB");
           return res.status(400).json({
             success: false,
             message: "Total file size cannot exceed 50MB",
@@ -208,13 +236,26 @@ router.post(
 
         // Validate file signatures for security
         for (const file of req.files) {
+          console.log(
+            "Validating file:",
+            file.originalname,
+            "Type:",
+            file.mimetype,
+            "Size:",
+            file.size
+          );
           if (!validateFileSignature(file.buffer, file.mimetype)) {
+            console.log(
+              "ERROR: Invalid file signature for:",
+              file.originalname
+            );
             return res.status(400).json({
               success: false,
               message: `Invalid file format detected: ${file.originalname}`,
             });
           }
         }
+        console.log("File validation passed");
       }
 
       // Handle file uploads
@@ -232,7 +273,7 @@ router.post(
             const fileName = `${Date.now()}-${Math.random()
               .toString(36)
               .substring(7)}-${sanitizedName}`;
-            const filePath = `group-files/${groupId}/${fileName}`;
+            const filePath = `${groupId}/${fileName}`;
 
             const { data: uploadData, error: uploadError } =
               await supabase.storage
@@ -241,23 +282,16 @@ router.post(
                   contentType: file.mimetype,
                 });
 
+            console.log("=== FILE UPLOAD DEBUG ===");
+            console.log("File Path:", filePath);
+            console.log("Upload Data:", uploadData);
+            console.log("Upload Error:", uploadError);
+
             if (uploadError) {
-              console.error("Error uploading file:", uploadError);
-
-              // Cleanup already uploaded files
-              for (const uploadedFile of uploadedFiles) {
-                try {
-                  await supabase.storage
-                    .from("group-files")
-                    .remove([uploadedFile]);
-                } catch (cleanupError) {
-                  console.error("Error cleaning up file:", cleanupError);
-                }
-              }
-
+              console.error("File upload failed:", uploadError);
               return res.status(500).json({
                 success: false,
-                message: "Error uploading files",
+                message: "File upload failed",
               });
             }
 
@@ -270,17 +304,29 @@ router.post(
         }
 
         // Check for links in content
-        const linkRegex = /(https?:\/\/[^\s]+)/g;
-        const isContainsLink = linkRegex.test(content);
+        const linkRegex =
+          /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})/g;
+        const isContainsLink = linkRegex.test(messageContent);
 
         // Create message
+        const { data: userData, error: userError } = await supabase
+          .from("users")
+          .select("full_name")
+          .eq("id", req.user.id)
+          .single();
+
+        const facultyName = userData?.full_name || "Unknown User";
+
+        // Allow empty content when files are present
+        const finalMessageContent = messageContent || "";
+
         const { data: message, error: messageError } = await supabase
           .from("messages")
           .insert({
             group_id: groupId,
             user_id: userId,
-            faculty_name: req.user.full_name,
-            message_content: content.trim(),
+            faculty_name: facultyName, // Use the fetched name
+            message_content: finalMessageContent,
             is_contains_link: isContainsLink,
             is_contains_file: fileUrls.length > 0,
             file_urls: fileUrls,
@@ -308,6 +354,12 @@ router.post(
             message: "Error creating message",
           });
         }
+
+        // Update group last message timestamp
+        await supabase
+          .from("groups")
+          .update({ last_message_at: new Date().toISOString() })
+          .eq("id", groupId);
 
         res.json({
           success: true,
@@ -414,11 +466,23 @@ router.get(
       const filePath = message.file_urls[fileIndexNum];
       const fileName = message.file_names[fileIndexNum];
 
+      // Add this debugging before generating the signed URL:
+      console.log("=== FILE DOWNLOAD DEBUG ===");
+      console.log("Message ID:", messageId);
+      console.log("File Index:", fileIndex);
+      console.log("File URLs:", message.file_urls);
+      console.log("File Names:", message.file_names);
+      console.log("File Path:", filePath);
+      console.log("File Name:", fileName);
+
       // Generate signed URL for file download
       const { data: signedUrlData, error: signedUrlError } =
         await supabase.storage
           .from("group-files")
           .createSignedUrl(filePath, 3600); // 1 hour expiry
+
+      console.log("Signed URL Error:", signedUrlError);
+      console.log("Signed URL Data:", signedUrlData);
 
       if (signedUrlError) {
         console.error("Error generating signed URL:", signedUrlError);
@@ -427,6 +491,17 @@ router.get(
           message: "Error generating download URL",
         });
       }
+
+      // Verify file exists in storage
+      const { data: fileExists, error: fileCheckError } = await supabase.storage
+        .from("group-files")
+        .list(filePath.split("/")[0], {
+          search: filePath.split("/")[1],
+        });
+
+      console.log("=== FILE EXISTENCE CHECK ===");
+      console.log("File Exists:", fileExists);
+      console.log("File Check Error:", fileCheckError);
 
       res.json({
         success: true,

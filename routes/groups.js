@@ -369,7 +369,7 @@ router.get("/:groupId/students", authenticateToken, async (req, res) => {
       .select(
         `
         user_id,
-        users!inner(
+        users!user_groups_user_id_fkey(
           id,
           full_name,
           register_number
