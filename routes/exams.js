@@ -70,7 +70,7 @@ router.get("/:groupId/exams", authenticateToken, async (req, res) => {
 router.post("/:groupId/exams", authenticateToken, async (req, res) => {
   try {
     const { groupId } = req.params;
-    const { exam_name, components } = req.body;
+    const { exam_name, components, reduction_marks } = req.body;
 
     // Check if user is a teacher in this group
     const { data: userGroup, error: userGroupError } = await supabase
@@ -97,6 +97,23 @@ router.post("/:groupId/exams", authenticateToken, async (req, res) => {
       });
     }
 
+    // Calculate total marks from components
+    const totalMarks = components.reduce(
+      (sum, comp) => sum + Number(comp.max_marks),
+      0
+    );
+
+    // Validate reduction_marks if provided
+    if (reduction_marks !== null && reduction_marks !== undefined) {
+      const reduction = Number(reduction_marks);
+      if (isNaN(reduction) || reduction < 0 || reduction > totalMarks) {
+        return res.status(400).json({
+          success: false,
+          message: "Reduction marks must be between 0 and total marks",
+        });
+      }
+    }
+
     // Create exam
     const { data: exam, error: examError } = await supabase
       .from("exams")
@@ -104,6 +121,7 @@ router.post("/:groupId/exams", authenticateToken, async (req, res) => {
         group_id: groupId,
         exam_name: exam_name,
         created_by: req.user.id,
+        reduction_marks: reduction_marks ? Number(reduction_marks) : null,
       })
       .select()
       .single();
@@ -142,10 +160,69 @@ router.post("/:groupId/exams", authenticateToken, async (req, res) => {
       exam: {
         ...exam,
         exam_components: examComponents,
+        total_marks: totalMarks,
+        final_marks: reduction_marks
+          ? totalMarks - Number(reduction_marks)
+          : totalMarks,
       },
     });
   } catch (error) {
     console.error("Error creating exam:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+});
+
+// Get specific exam details
+router.get("/:groupId/exams/:examId", authenticateToken, async (req, res) => {
+  try {
+    const { groupId, examId } = req.params;
+
+    // Check if user has access to this group
+    const { data: userGroup, error: userGroupError } = await supabase
+      .from("user_groups")
+      .select("id")
+      .eq("user_id", req.user.id)
+      .eq("group_id", groupId)
+      .eq("is_active", true)
+      .single();
+
+    if (userGroupError || !userGroup) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied to this group",
+      });
+    }
+
+    const { data: exam, error } = await supabase
+      .from("exams")
+      .select(
+        `
+        *,
+        created_by_user:users!exams_created_by_fkey(full_name),
+        exam_components!inner(*)
+      `
+      )
+      .eq("id", examId)
+      .eq("group_id", groupId)
+      .eq("is_active", true)
+      .single();
+
+    if (error || !exam) {
+      return res.status(404).json({
+        success: false,
+        message: "Exam not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      exam: exam,
+    });
+  } catch (error) {
+    console.error("Error fetching exam details:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",

@@ -285,3 +285,5 @@ CHECK (member_type IN ('student', 'teacher', 'faculty'));
 
 
 ALTER TABLE groups ADD COLUMN last_message_at TIMESTAMP;
+
+ALTER TABLE exams ADD COLUMN reduction_marks DECIMAL(10,2) DEFAULT NULL;

@@ -361,4 +361,183 @@ router.post("/:groupId/:date", authenticateToken, async (req, res) => {
   }
 });
 
+// Add this export route after the existing routes
+router.get(
+  "/:groupId/export/:startDate/:endDate",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { groupId, startDate, endDate } = req.params;
+      const userId = req.user.id;
+      const userRole = req.user.role;
+
+      // Only teachers can export attendance
+      if (userRole !== "faculty") {
+        return res.status(403).json({
+          success: false,
+          message: "Only teachers can export attendance",
+        });
+      }
+
+      // Check if user is a teacher in this group
+      const { data: userGroup, error: userGroupError } = await supabase
+        .from("user_groups")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("group_id", groupId)
+        .eq("member_type", "teacher")
+        .eq("is_active", true)
+        .single();
+
+      if (userGroupError || !userGroup) {
+        return res.status(403).json({
+          success: false,
+          message: "Only teachers can export attendance",
+        });
+      }
+
+      // Get group information
+      const { data: group, error: groupError } = await supabase
+        .from("groups")
+        .select("name")
+        .eq("id", groupId)
+        .single();
+
+      if (groupError || !group) {
+        return res.status(404).json({
+          success: false,
+          message: "Group not found",
+        });
+      }
+
+      // Get all students in the group
+      const { data: members, error: membersError } = await supabase
+        .from("user_groups")
+        .select(
+          `
+        users!user_groups_user_id_fkey(
+          id,
+          full_name,
+          register_number
+        )
+      `
+        )
+        .eq("group_id", groupId)
+        .eq("is_active", true)
+        .eq("member_type", "student")
+        .order("users(register_number)", { ascending: true, nullsLast: true })
+        .order("users(full_name)", { ascending: true });
+
+      if (membersError) {
+        return res.status(500).json({
+          success: false,
+          message: "Error fetching group members",
+        });
+      }
+
+      // Get attendance records for the date range
+      const { data: attendance, error: attendanceError } = await supabase
+        .from("attendance")
+        .select("*")
+        .eq("group_id", groupId)
+        .gte("attendance_date", startDate)
+        .lte("attendance_date", endDate)
+        .order("attendance_date", { ascending: true });
+
+      if (attendanceError) {
+        return res.status(500).json({
+          success: false,
+          message: "Error fetching attendance records",
+        });
+      }
+
+      // Create Excel workbook
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Attendance Report");
+
+      // Set up columns
+      worksheet.columns = [
+        { header: "Group Name", key: "groupName", width: 20 },
+        { header: "Student Name", key: "studentName", width: 25 },
+        { header: "Register Number", key: "registerNumber", width: 15 },
+        { header: "Date", key: "date", width: 12 },
+        { header: "Status", key: "status", width: 10 },
+      ];
+
+      // Style the header row
+      worksheet.getRow(1).font = { bold: true };
+      worksheet.getRow(1).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE6E6FA" },
+      };
+
+      // Group attendance by date
+      const attendanceByDate = {};
+      attendance?.forEach((record) => {
+        if (!attendanceByDate[record.attendance_date]) {
+          attendanceByDate[record.attendance_date] = {};
+        }
+        attendanceByDate[record.attendance_date][record.user_id] =
+          record.status;
+      });
+
+      // Generate date range
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      const dates = [];
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        dates.push(d.toISOString().split("T")[0]);
+      }
+
+      // Add data rows
+      members?.forEach((member) => {
+        dates.forEach((date) => {
+          const status =
+            attendanceByDate[date]?.[member.users.id] || "Not Marked";
+          const statusText =
+            status === "present"
+              ? "Present"
+              : status === "absent"
+              ? "Absent"
+              : "Not Marked";
+
+          worksheet.addRow({
+            groupName: group.name,
+            studentName: member.users.full_name,
+            registerNumber: member.users.register_number || "N/A",
+            date: new Date(date).toLocaleDateString(),
+            status: statusText,
+          });
+        });
+      });
+
+      // Auto-fit columns
+      worksheet.columns.forEach((column) => {
+        column.width = Math.max(column.width || 10, 15);
+      });
+
+      // Set response headers
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="attendance_${group.name}_${startDate}_to_${endDate}.xlsx"`
+      );
+
+      // Write Excel file to response
+      await workbook.xlsx.write(res);
+      res.end();
+    } catch (error) {
+      console.error("Error exporting attendance:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error",
+      });
+    }
+  }
+);
+
 module.exports = router;

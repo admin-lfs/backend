@@ -363,6 +363,11 @@ router.get("/:groupId/students", authenticateToken, async (req, res) => {
     }
 
     const { groupId } = req.params;
+    const { currentGroupId } = req.query;
+
+    console.log("=== STUDENTS ROUTE ===");
+    console.log("Source groupId (students from):", groupId);
+    console.log("Target currentGroupId (students going to):", currentGroupId);
 
     const { data: students, error } = await supabase
       .from("user_groups")
@@ -382,18 +387,50 @@ router.get("/:groupId/students", authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    const formattedStudents = students.map((item) => ({
-      id: item.users.id,
-      full_name: item.users.full_name,
-      register_number: item.users.register_number,
-    }));
+    // Get current group members to check who's already in the target group
+    const { data: currentMembers, error: membersError } = await supabase
+      .from("user_groups")
+      .select("user_id")
+      .eq("group_id", currentGroupId)
+      .eq("is_active", true);
+
+    if (membersError) {
+      console.error("Error fetching current members:", membersError);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch current members",
+      });
+    }
+
+    const currentMemberIds = new Set(
+      currentMembers?.map((member) => member.user_id) || []
+    );
+
+    console.log(
+      "Current member IDs in target group:",
+      Array.from(currentMemberIds)
+    );
+
+    const formattedStudents = students.map((item) => {
+      const isInGroup = currentMemberIds.has(item.users.id);
+      console.log(`Student ${item.users.full_name}: isInGroup = ${isInGroup}`);
+
+      return {
+        id: item.users.id,
+        full_name: item.users.full_name,
+        register_number: item.users.register_number,
+        isInGroup, // This is the key field that tells frontend if student is already in group
+      };
+    });
+
+    console.log("Formatted students with isInGroup:", formattedStudents);
 
     res.json({
       success: true,
       students: formattedStudents,
     });
   } catch (error) {
-    console.error("Error fetching group students:", error);
+    console.error("Error in get students:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch students",
