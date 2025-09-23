@@ -435,7 +435,9 @@ router.get(
   }
 );
 
-// Add this route after the existing routes
+// Add this route before module.exports = router; at the end of the file
+
+// Export grades for a specific exam
 router.get(
   "/:groupId/exams/:examId/export",
   authenticateToken,
@@ -443,6 +445,11 @@ router.get(
     try {
       const { groupId, examId } = req.params;
       const userRole = req.user.role;
+
+      console.log("=== EXPORT GRADES REQUEST ===");
+      console.log("GroupId:", groupId);
+      console.log("ExamId:", examId);
+      console.log("UserRole:", userRole);
 
       // Only teachers can export grades
       if (userRole !== "faculty") {
@@ -462,6 +469,7 @@ router.get(
         .single();
 
       if (userGroupError || !userGroup) {
+        console.log("User group error:", userGroupError);
         return res.status(403).json({
           success: false,
           message: "Access denied to this group",
@@ -489,6 +497,7 @@ router.get(
         .single();
 
       if (examError || !exam) {
+        console.log("Exam error:", examError);
         return res.status(404).json({
           success: false,
           message: "Exam not found",
@@ -498,11 +507,12 @@ router.get(
       // Get group details
       const { data: group, error: groupError } = await supabase
         .from("groups")
-        .select("group_name")
+        .select("name") // Changed from "group_name" to "name"
         .eq("id", groupId)
         .single();
 
       if (groupError || !group) {
+        console.log("Group error:", groupError);
         return res.status(404).json({
           success: false,
           message: "Group not found",
@@ -518,7 +528,7 @@ router.get(
           student_id,
           component_scores,
           total_marks,
-          students!grades_student_id_fkey (
+          users!grades_student_id_fkey (
             full_name,
             register_number
           ),
@@ -527,8 +537,7 @@ router.get(
           )
         `
         )
-        .eq("exam_id", examId)
-        .eq("group_id", groupId);
+        .eq("exam_id", examId);
 
       if (gradesError) {
         console.error("Error fetching grades:", gradesError);
@@ -537,6 +546,8 @@ router.get(
           message: "Failed to fetch grades",
         });
       }
+
+      console.log("Found grades:", grades.length);
 
       // Create Excel workbook
       const workbook = new ExcelJS.Workbook();
@@ -555,17 +566,14 @@ router.get(
         (a, b) => a.component_order - b.component_order
       );
 
-      // Sort grades by register number
+      // Also update the sorting logic to use users instead of students
       const sortedGrades = grades.sort((a, b) => {
-        if (a.students.register_number && b.students.register_number) {
-          return a.students.register_number.localeCompare(
-            b.students.register_number
-          );
+        if (a.users.register_number && b.users.register_number) {
+          return a.users.register_number.localeCompare(b.users.register_number);
         }
-        if (a.students.register_number && !b.students.register_number)
-          return -1;
-        if (!a.students.register_number && b.students.register_number) return 1;
-        return a.students.full_name.localeCompare(b.students.full_name);
+        if (a.users.register_number && !b.users.register_number) return -1;
+        if (!a.users.register_number && b.users.register_number) return 1;
+        return a.users.full_name.localeCompare(b.users.full_name);
       });
 
       // Sheet 1: Non-scaled grades
@@ -594,8 +602,8 @@ router.get(
       // Add data rows for non-scaled sheet
       sortedGrades.forEach((grade) => {
         const row = [
-          grade.students.full_name,
-          grade.students.register_number || "",
+          grade.users.full_name, // Changed from grade.students.full_name
+          grade.users.register_number || "", // Changed from grade.students.register_number
           ...sortedComponents.map(
             (comp) => grade.component_scores[comp.id] || 0
           ),
@@ -635,15 +643,15 @@ router.get(
           fgColor: { argb: "FFE5E7EB" },
         };
 
-        // Add data rows for scaled sheet
+        // Update the scaled sheet data rows - only scale total marks, not components
         sortedGrades.forEach((grade) => {
           const row = [
-            grade.students.full_name,
-            grade.students.register_number || "",
-            ...sortedComponents.map((comp) =>
-              Math.round((grade.component_scores[comp.id] || 0) * scalingFactor)
+            grade.users.full_name,
+            grade.users.register_number || "",
+            ...sortedComponents.map(
+              (comp) => grade.component_scores[comp.id] || 0 // Keep original component scores
             ),
-            Math.round(grade.total_marks * scalingFactor),
+            Math.round(grade.total_marks * scalingFactor), // Only scale total marks
             exam.reduction_marks,
             grade.added_by_user.full_name,
           ];
@@ -663,7 +671,7 @@ router.get(
       );
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="${exam.exam_name}_${group.group_name}_Grades.xlsx"`
+        `attachment; filename="${group.name}_${exam.exam_name}.xlsx"`
       );
 
       // Write workbook to response

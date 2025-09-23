@@ -180,6 +180,60 @@ router.post("/:groupId/events", authenticateToken, async (req, res) => {
   }
 });
 
+// Delete event
+router.delete(
+  "/:groupId/events/:eventId",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { groupId, eventId } = req.params;
+
+      // Check if user is a teacher in this group
+      const { data: userGroup, error: userGroupError } = await supabase
+        .from("user_groups")
+        .select("id")
+        .eq("user_id", req.user.id)
+        .eq("group_id", groupId)
+        .eq("member_type", "teacher")
+        .eq("is_active", true)
+        .single();
+
+      if (userGroupError || !userGroup) {
+        return res.status(403).json({
+          success: false,
+          message: "Only teachers can delete events",
+        });
+      }
+
+      // Soft delete the event by setting is_deleted to true
+      const { error: deleteError } = await supabase
+        .from("events")
+        .update({ is_deleted: true })
+        .eq("id", eventId)
+        .eq("group_id", groupId);
+
+      if (deleteError) {
+        console.error("Error deleting event:", deleteError);
+        return res.status(500).json({
+          success: false,
+          message: "Error deleting event",
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Event deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting event:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error",
+      });
+    }
+  }
+);
+
 // Get all events for an organization (for homepage)
 router.get("/org/:orgId", authenticateToken, async (req, res) => {
   try {
