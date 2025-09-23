@@ -387,29 +387,35 @@ router.get("/:groupId/students", authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // Get current group members to check who's already in the target group
-    const { data: currentMembers, error: membersError } = await supabase
-      .from("user_groups")
-      .select("user_id")
-      .eq("group_id", currentGroupId)
-      .eq("is_active", true);
+    // Only check current group members if currentGroupId is provided
+    let currentMemberIds = new Set();
 
-    if (membersError) {
-      console.error("Error fetching current members:", membersError);
-      return res.status(500).json({
-        success: false,
-        message: "Failed to fetch current members",
-      });
+    if (currentGroupId && currentGroupId !== "undefined") {
+      const { data: currentMembers, error: membersError } = await supabase
+        .from("user_groups")
+        .select("user_id")
+        .eq("group_id", currentGroupId)
+        .eq("is_active", true);
+
+      if (membersError) {
+        console.error("Error fetching current members:", membersError);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to fetch current members",
+        });
+      }
+
+      currentMemberIds = new Set(
+        currentMembers?.map((member) => member.user_id) || []
+      );
+
+      console.log(
+        "Current member IDs in target group:",
+        Array.from(currentMemberIds)
+      );
+    } else {
+      console.log("No currentGroupId provided, all students will be available");
     }
-
-    const currentMemberIds = new Set(
-      currentMembers?.map((member) => member.user_id) || []
-    );
-
-    console.log(
-      "Current member IDs in target group:",
-      Array.from(currentMemberIds)
-    );
 
     const formattedStudents = students.map((item) => {
       const isInGroup = currentMemberIds.has(item.users.id);
@@ -430,10 +436,10 @@ router.get("/:groupId/students", authenticateToken, async (req, res) => {
       students: formattedStudents,
     });
   } catch (error) {
-    console.error("Error in get students:", error);
+    console.error("Error in students route:", error);
     res.status(500).json({
       success: false,
-      message: "Failed to fetch students",
+      message: "Internal server error",
     });
   }
 });
