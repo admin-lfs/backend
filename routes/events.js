@@ -62,7 +62,8 @@ router.get(
         .eq("group_id", groupId)
         .eq("is_active", true)
         .eq("is_deleted", false) // Exclude deleted events
-        .order("event_date", { ascending: false });
+        .gte("event_date", new Date().toISOString().split("T")[0]) // Only future events
+        .order("event_date", { ascending: true }); // Show upcoming events first
 
       if (eventsError) {
         console.error("Error fetching events:", eventsError);
