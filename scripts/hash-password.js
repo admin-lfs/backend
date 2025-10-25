@@ -8,4 +8,4 @@ const hashPassword = async (password) => {
 };
 
 // Generate hash for password123
-hashPassword("password123");
+hashPassword("password");
