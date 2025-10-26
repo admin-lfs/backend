@@ -366,4 +366,318 @@ router.post("/faculty-login", async (req, res) => {
   }
 });
 
+// Admin authentication routes
+// Step 1: Verify admin credentials (username/password)
+router.post("/admin-verify-credentials", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    // Input validation
+    if (
+      !username ||
+      !password ||
+      username.length < 3 ||
+      username.length > 50 ||
+      password.length < 1
+    ) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // IP-based login protection
+    const ipLoginKey = `ip_admin_login:${req.ip}`;
+    const ipLoginCount = (await redis.get(ipLoginKey)) || 0;
+
+    if (parseInt(ipLoginCount) >= 100) {
+      return res.status(429).json({
+        error:
+          "Too many login attempts from this location. Please try again in 1 minute.",
+      });
+    }
+
+    // Get admin user from database
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("username", username.toLowerCase())
+      .eq("role", "admin")
+      .single();
+
+    if (error || !user) {
+      // Increment IP login counter
+      await redis.incr(ipLoginKey);
+      await redis.expire(ipLoginKey, 60); // 1 minute
+      console.log(
+        `❌ Failed admin login attempt: ${username} (user not found)`
+      );
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    if (!user.is_active) {
+      // Increment IP login counter
+      await redis.incr(ipLoginKey);
+      await redis.expire(ipLoginKey, 60);
+      console.log(`❌ Login attempt on deactivated admin account: ${username}`);
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    // Check if account is locked
+    if (user.locked_until && new Date() < new Date(user.locked_until)) {
+      await redis.incr(ipLoginKey);
+      await redis.expire(ipLoginKey, 60);
+      const lockTimeRemaining = Math.ceil(
+        (new Date(user.locked_until) - new Date()) / 1000 / 60
+      );
+      console.log(`❌ Login attempt on locked admin account: ${username}`);
+      return res.status(423).json({
+        error: `Account is locked. Try again in ${lockTimeRemaining} minutes`,
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await comparePassword(password, user.password_hash);
+
+    if (!isValidPassword) {
+      // Increment failed attempts
+      const newFailedAttempts = (user.failed_attempts || 0) + 1;
+      const updateData = {
+        failed_attempts: newFailedAttempts,
+        updated_at: new Date().toISOString(),
+      };
+
+      // Lock account after 3 failed attempts
+      if (newFailedAttempts >= 3) {
+        const lockUntil = new Date();
+        lockUntil.setMinutes(lockUntil.getMinutes() + 30);
+        updateData.locked_until = lockUntil.toISOString();
+      }
+
+      await supabase.from("users").update(updateData).eq("id", user.id);
+
+      // Increment IP login counter
+      await redis.incr(ipLoginKey);
+      await redis.expire(ipLoginKey, 60);
+
+      console.log(
+        `❌ Failed admin password for: ${username} (${newFailedAttempts}/3 attempts)`
+      );
+
+      if (newFailedAttempts >= 3) {
+        return res.status(423).json({
+          error: `Account locked after 3 failed attempts. Try again in 30 minutes`,
+        });
+      }
+
+      return res.status(401).json({
+        error: `Invalid credentials. ${
+          3 - newFailedAttempts
+        } attempts remaining`,
+      });
+    }
+
+    // Check if admin has phone number
+    if (!user.phone_number) {
+      await redis.incr(ipLoginKey);
+      await redis.expire(ipLoginKey, 60);
+      return res.status(400).json({
+        error:
+          "Phone number not registered. Please contact system administrator.",
+      });
+    }
+
+    // Reset failed attempts on successful credential verification
+    await supabase
+      .from("users")
+      .update({
+        failed_attempts: 0,
+        locked_until: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", user.id);
+
+    // Increment IP login counter
+    await redis.incr(ipLoginKey);
+    await redis.expire(ipLoginKey, 60);
+
+    console.log(`✅ Admin credentials verified: ${username}`);
+
+    res.json({
+      success: true,
+      phoneNumberMasked: user.phone_number.slice(-4), // Only send last 4 digits
+      message:
+        "Credentials verified. OTP will be sent to your registered phone number.",
+    });
+  } catch (error) {
+    console.error("Admin credential verification error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// Step 2: Send OTP to admin's phone number
+router.post("/admin-send-otp", async (req, res) => {
+  try {
+    const { username } = req.body;
+
+    if (!username || username.length < 3 || username.length > 50) {
+      return res.status(400).json({ error: "Valid username required" });
+    }
+
+    // Check for OTP request rate limiting
+    const otpRateKey = `otp_admin_rate:${username}`;
+    const recentRequests = (await redis.get(otpRateKey)) || 0;
+
+    if (parseInt(recentRequests) >= 3) {
+      return res.status(429).json({
+        error: "Too many OTP requests. Please try again in 15 minutes",
+      });
+    }
+
+    // IP-based OTP protection
+    const ipOtpKey = `ip_admin_otp:${req.ip}`;
+    const ipOtpCount = (await redis.get(ipOtpKey)) || 0;
+
+    if (parseInt(ipOtpCount) >= 100) {
+      return res.status(429).json({
+        error:
+          "Too many OTP requests from this location. Please try again in 1 minute.",
+      });
+    }
+
+    // Check if admin exists with this username
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("phone_number, role, is_active, org_id")
+      .eq("username", username.toLowerCase())
+      .eq("role", "admin")
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({
+        error: "Admin account not found.",
+      });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({
+        error:
+          "Admin account is deactivated. Please contact system administrator.",
+      });
+    }
+
+    if (!user.phone_number) {
+      return res.status(400).json({
+        error: "Phone number not registered for this admin account.",
+      });
+    }
+
+    // Generate and store OTP using phone number with admin role
+    const otp = generateOTP();
+    await storeOTP(user.phone_number, otp, "admin");
+
+    // Increment OTP request counter (15 minutes window)
+    await redis.incr(otpRateKey);
+    await redis.expire(otpRateKey, 15 * 60); // 15 minutes
+
+    // Increment IP OTP counter
+    await redis.incr(ipOtpKey);
+    await redis.expire(ipOtpKey, 60); // 1 minute
+
+    // For development/testing - always use 123456
+    if (process.env.NODE_ENV === "development") {
+      console.log(`📱 Admin OTP for ${user.phone_number}: 123456 (dummy OTP)`);
+      // Store the dummy OTP with admin prefix
+      await redis.set(`otp:admin:${user.phone_number}`, "123456", { ex: 100 });
+    }
+
+    res.json({
+      message: "OTP sent successfully",
+      expiresIn: "100",
+      attemptsRemaining: 3,
+    });
+  } catch (error) {
+    console.error("Admin send OTP error:", error);
+    res.status(500).json({ error: "Failed to send OTP" });
+  }
+});
+
+// Step 3: Verify OTP and complete admin login
+router.post("/admin-verify-otp", async (req, res) => {
+  try {
+    const { username, password, otp } = req.body;
+
+    if (!username || !password || !otp) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({ error: "OTP must be 6 digits" });
+    }
+
+    // Get admin user first to get phone number
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("username", username.toLowerCase())
+      .eq("role", "admin")
+      .single();
+
+    if (error || !user) {
+      console.log(
+        `❌ Admin OTP verification failed: ${username} - user not found`
+      );
+      return res.status(404).json({
+        error: "Admin account not found.",
+      });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Admin account is deactivated." });
+    }
+
+    if (!user.phone_number) {
+      return res.status(400).json({
+        error: "Phone number not registered for this admin account.",
+      });
+    }
+
+    // Verify OTP with attempt limiting using phone number and admin role
+    const otpResult = await verifyOTP(user.phone_number, otp, "admin");
+    if (!otpResult.success) {
+      return res.status(400).json({ error: otpResult.error });
+    }
+
+    // Final password verification
+    const isValidPassword = await comparePassword(password, user.password_hash);
+    if (!isValidPassword) {
+      console.log(
+        `❌ Admin OTP verification failed: ${username} - invalid password`
+      );
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Generate JWT token
+    const token = generateToken({
+      userId: user.id,
+      orgId: user.org_id,
+    });
+
+    // Log successful admin login
+    console.log(`✅ Successful admin login: ${username} (${user.role})`);
+
+    res.json({
+      message: "Admin login successful",
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        full_name: user.full_name,
+        role: user.role,
+        org_id: user.org_id,
+      },
+    });
+  } catch (error) {
+    console.error("Admin verify OTP error:", error);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
 module.exports = router;

@@ -4,9 +4,15 @@ const generateOTP = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-const storeOTP = async (phoneNumber, otp) => {
-  const otpKey = `otp:${phoneNumber}`;
-  const attemptsKey = `otp_attempts:${phoneNumber}`;
+const storeOTP = async (phoneNumber, otp, role = null) => {
+  // Add admin prefix if role is admin, otherwise use original format
+  const keyPrefix = role === "admin" ? "admin" : "";
+  const otpKey = keyPrefix
+    ? `otp:${keyPrefix}:${phoneNumber}`
+    : `otp:${phoneNumber}`;
+  const attemptsKey = keyPrefix
+    ? `otp_attempts:${keyPrefix}:${phoneNumber}`
+    : `otp_attempts:${phoneNumber}`;
 
   // Store OTP with expiry
   await redis.set(otpKey, otp, { ex: 100 });
@@ -15,9 +21,15 @@ const storeOTP = async (phoneNumber, otp) => {
   await redis.set(attemptsKey, 0, { ex: 100 });
 };
 
-const verifyOTP = async (phoneNumber, inputOTP) => {
-  const otpKey = `otp:${phoneNumber}`;
-  const attemptsKey = `otp_attempts:${phoneNumber}`;
+const verifyOTP = async (phoneNumber, inputOTP, role = null) => {
+  // Add admin prefix if role is admin, otherwise use original format
+  const keyPrefix = role === "admin" ? "admin" : "";
+  const otpKey = keyPrefix
+    ? `otp:${keyPrefix}:${phoneNumber}`
+    : `otp:${phoneNumber}`;
+  const attemptsKey = keyPrefix
+    ? `otp_attempts:${keyPrefix}:${phoneNumber}`
+    : `otp_attempts:${phoneNumber}`;
 
   // Check if OTP exists
   const storedOTP = await redis.get(otpKey);
@@ -71,15 +83,25 @@ const verifyOTP = async (phoneNumber, inputOTP) => {
   return { success: true };
 };
 
-const deleteOTP = async (phoneNumber) => {
-  const otpKey = `otp:${phoneNumber}`;
-  const attemptsKey = `otp_attempts:${phoneNumber}`;
+const deleteOTP = async (phoneNumber, role = null) => {
+  // Add admin prefix if role is admin, otherwise use original format
+  const keyPrefix = role === "admin" ? "admin" : "";
+  const otpKey = keyPrefix
+    ? `otp:${keyPrefix}:${phoneNumber}`
+    : `otp:${phoneNumber}`;
+  const attemptsKey = keyPrefix
+    ? `otp_attempts:${keyPrefix}:${phoneNumber}`
+    : `otp_attempts:${phoneNumber}`;
   await redis.del(otpKey);
   await redis.del(attemptsKey);
 };
 
-const getRemainingAttempts = async (phoneNumber) => {
-  const attemptsKey = `otp_attempts:${phoneNumber}`;
+const getRemainingAttempts = async (phoneNumber, role = null) => {
+  // Add admin prefix if role is admin, otherwise use original format
+  const keyPrefix = role === "admin" ? "admin" : "";
+  const attemptsKey = keyPrefix
+    ? `otp_attempts:${keyPrefix}:${phoneNumber}`
+    : `otp_attempts:${phoneNumber}`;
   const attempts = (await redis.get(attemptsKey)) || 0;
   return Math.max(0, 3 - parseInt(attempts));
 };

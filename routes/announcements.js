@@ -1,192 +1,250 @@
 const express = require("express");
-const router = express.Router();
-const { authenticateToken } = require("../middleware/auth");
-const parentChildValidator = require("../middleware/parentChildValidator");
 const supabase = require("../config/supabase");
+const { authenticateToken } = require("../middleware/auth");
 
-// Get announcements for a user's organization
-router.get("/", authenticateToken, async (req, res) => {
-  try {
-    const { limit = 25, offset = 0, lastUpdated } = req.query;
-    const userRole = req.user.role;
-    const userOrgId = req.user.org_id;
-    const userId = req.user.id;
+const router = express.Router();
 
-    console.log("Announcements API - User role:", userRole);
-    console.log("Announcements API - User org ID:", userOrgId);
-    console.log("Announcements API - Last updated:", lastUpdated);
-
-    let targetOrgId = userOrgId;
-
-    // If user is a parent, get child's org_id
-    if (userRole === "parent") {
-      const { childId } = req.query;
-
-      if (!childId) {
-        return res.status(400).json({
-          error: "Child ID is required for parents",
-        });
-      }
-
-      // Validate child access
-      return parentChildValidator(req, res, async () => {
-        try {
-          targetOrgId = req.validatedChild.orgId;
-          await fetchAnnouncements(
-            targetOrgId,
-            limit,
-            offset,
-            lastUpdated,
-            res
-          );
-        } catch (error) {
-          console.error("Error fetching announcements for child:", error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
-    }
-
-    // For faculty and students, use their own org_id
-    await fetchAnnouncements(targetOrgId, limit, offset, lastUpdated, res);
-  } catch (error) {
-    console.error("Announcements API error:", error);
-    res.status(500).json({ error: "Internal server error" });
+// Middleware to ensure only admins can access
+router.use(authenticateToken);
+router.use((req, res, next) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ error: "Access denied. Only admins can perform this action." });
   }
+  next();
 });
 
-// Check for new announcements for the current user's organization
-router.get("/check-new", authenticateToken, async (req, res) => {
+// Get announcements for organization with pagination
+router.get("/", async (req, res) => {
   try {
-    const { lastUpdated } = req.query;
-    const userRole = req.user.role;
-    const userOrgId = req.user.org_id;
+    const orgId = req.user.org_id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
 
-    console.log("Check new announcements - User role:", userRole);
-    console.log("Check new announcements - User org ID:", userOrgId);
-    console.log("Check new announcements - Last updated:", lastUpdated);
+    // Get today's date for filtering
+    const today = new Date().toISOString().split("T")[0];
 
-    let targetOrgId = userOrgId;
+    // Get total count
+    const { count, error: countError } = await supabase
+      .from("announcements")
+      .select("*", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .eq("is_active", true)
+      .gte("created_at", today);
 
-    // If user is a parent, get child's org_id
-    if (userRole === "parent") {
-      const { childId } = req.query;
-
-      if (!childId) {
-        return res.status(400).json({
-          error: "Child ID is required for parents",
-        });
-      }
-
-      // Validate child access
-      return parentChildValidator(req, res, async () => {
-        try {
-          targetOrgId = req.validatedChild.orgId;
-          await checkNewAnnouncements(targetOrgId, lastUpdated, res);
-        } catch (error) {
-          console.error("Error checking new announcements for child:", error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
+    if (countError) {
+      console.error("Count error:", countError);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch announcements count" });
     }
 
-    // For faculty and students, use their own org_id
-    await checkNewAnnouncements(targetOrgId, lastUpdated, res);
-  } catch (error) {
-    console.error("Check new announcements API error:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Helper function to fetch announcements
-async function fetchAnnouncements(orgId, limit, offset, lastUpdated, res) {
-  try {
-    console.log("fetchAnnouncements - Org ID:", orgId);
-    console.log("fetchAnnouncements - Last updated:", lastUpdated);
-
-    let query = supabase
+    // Get announcements with pagination
+    const { data: announcements, error } = await supabase
       .from("announcements")
       .select("*")
       .eq("org_id", orgId)
       .eq("is_active", true)
-      .order("updated_at", { ascending: false });
+      .gte("created_at", today)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
-    // If lastUpdated is provided, only get announcements newer than that
-    if (lastUpdated) {
-      query = query.gt("updated_at", lastUpdated);
-    }
-
-    // Apply limit and offset
-    query = query.range(
-      parseInt(offset),
-      parseInt(offset) + parseInt(limit) - 1
-    );
-
-    const { data: announcements, error: announcementsError } = await query;
-
-    if (announcementsError) {
-      console.error("Announcements query error:", announcementsError);
+    if (error) {
+      console.error("Announcements fetch error:", error);
       return res.status(500).json({ error: "Failed to fetch announcements" });
     }
 
-    console.log(
-      "fetchAnnouncements - Found announcements:",
-      announcements?.length || 0
-    );
+    const totalPages = Math.ceil(count / limit);
 
     res.json({
       success: true,
       announcements: announcements || [],
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalItems: count,
+        itemsPerPage: limit,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
     });
   } catch (error) {
-    console.error("Error in fetchAnnouncements:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Get announcements error:", error);
+    res.status(500).json({ error: "Failed to fetch announcements" });
   }
-}
+});
 
-// Helper function to check for new announcements
-async function checkNewAnnouncements(orgId, lastUpdated, res) {
+// Create new announcement
+router.post("/", async (req, res) => {
   try {
-    console.log("checkNewAnnouncements - Org ID:", orgId);
-    console.log("checkNewAnnouncements - Last updated:", lastUpdated);
+    const { title, description, priority = "normal" } = req.body;
+    const orgId = req.user.org_id;
 
-    let query = supabase
-      .from("announcements")
-      .select("id")
-      .eq("org_id", orgId)
-      .eq("is_active", true);
-
-    // If lastUpdated is provided, only get announcements newer than that
-    if (lastUpdated) {
-      query = query.gt("updated_at", lastUpdated);
-    }
-
-    // Only get 1 record to check if there are any new announcements
-    query = query.limit(1);
-
-    const { data: announcements, error: announcementsError } = await query;
-
-    if (announcementsError) {
-      console.error("Check new announcements query error:", announcementsError);
+    // Validation
+    if (!title || !description) {
       return res
-        .status(500)
-        .json({ error: "Failed to check for new announcements" });
+        .status(400)
+        .json({ error: "Title and description are required" });
     }
 
-    const hasNewAnnouncements = announcements && announcements.length > 0;
+    if (title.length > 255) {
+      return res
+        .status(400)
+        .json({ error: "Title must be 255 characters or less" });
+    }
 
-    console.log(
-      "checkNewAnnouncements - Has new announcements:",
-      hasNewAnnouncements
-    );
+    const validPriorities = ["low", "normal", "high", "urgent"];
+    if (!validPriorities.includes(priority)) {
+      return res
+        .status(400)
+        .json({
+          error: "Invalid priority. Must be one of: low, normal, high, urgent",
+        });
+    }
+
+    // Create announcement
+    const { data: announcement, error } = await supabase
+      .from("announcements")
+      .insert([
+        {
+          org_id: orgId,
+          title: title.trim(),
+          description: description.trim(),
+          priority,
+          is_active: true,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Create announcement error:", error);
+      return res.status(500).json({ error: "Failed to create announcement" });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Announcement created successfully",
+      announcement,
+    });
+  } catch (error) {
+    console.error("Create announcement error:", error);
+    res.status(500).json({ error: "Failed to create announcement" });
+  }
+});
+
+// Update announcement
+router.put("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, priority } = req.body;
+    const orgId = req.user.org_id;
+
+    // Validation
+    if (title && title.length > 255) {
+      return res
+        .status(400)
+        .json({ error: "Title must be 255 characters or less" });
+    }
+
+    if (priority) {
+      const validPriorities = ["low", "normal", "high", "urgent"];
+      if (!validPriorities.includes(priority)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid priority. Must be one of: low, normal, high, urgent",
+          });
+      }
+    }
+
+    // Check if announcement exists and belongs to organization
+    const { data: existingAnnouncement, error: fetchError } = await supabase
+      .from("announcements")
+      .select("*")
+      .eq("id", id)
+      .eq("org_id", orgId)
+      .single();
+
+    if (fetchError || !existingAnnouncement) {
+      return res.status(404).json({ error: "Announcement not found" });
+    }
+
+    // Update announcement
+    const updateData = {};
+    if (title !== undefined) updateData.title = title.trim();
+    if (description !== undefined) updateData.description = description.trim();
+    if (priority !== undefined) updateData.priority = priority;
+    updateData.updated_at = new Date().toISOString();
+
+    const { data: announcement, error } = await supabase
+      .from("announcements")
+      .update(updateData)
+      .eq("id", id)
+      .eq("org_id", orgId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Update announcement error:", error);
+      return res.status(500).json({ error: "Failed to update announcement" });
+    }
 
     res.json({
       success: true,
-      hasNewAnnouncements,
+      message: "Announcement updated successfully",
+      announcement,
     });
   } catch (error) {
-    console.error("Error in checkNewAnnouncements:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Update announcement error:", error);
+    res.status(500).json({ error: "Failed to update announcement" });
   }
-}
+});
+
+// Delete announcement (soft delete by setting is_active to false)
+router.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const orgId = req.user.org_id;
+
+    // Check if announcement exists and belongs to organization
+    const { data: existingAnnouncement, error: fetchError } = await supabase
+      .from("announcements")
+      .select("*")
+      .eq("id", id)
+      .eq("org_id", orgId)
+      .single();
+
+    if (fetchError || !existingAnnouncement) {
+      return res.status(404).json({ error: "Announcement not found" });
+    }
+
+    // Soft delete announcement
+    const { error } = await supabase
+      .from("announcements")
+      .update({
+        is_active: false,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .eq("org_id", orgId);
+
+    if (error) {
+      console.error("Delete announcement error:", error);
+      return res.status(500).json({ error: "Failed to delete announcement" });
+    }
+
+    res.json({
+      success: true,
+      message: "Announcement deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete announcement error:", error);
+    res.status(500).json({ error: "Failed to delete announcement" });
+  }
+});
 
 module.exports = router;
